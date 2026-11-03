@@ -30,7 +30,10 @@ $currentPage = 'dashboard';
 
 // Fetch real stats from database
 $totalEmployees = 0;
+$totalPresentToday = 0;
 $presentToday = 0;
+$onTimePresentToday = 0;
+$onLeaveToday = 0;
 $absentToday = 0;
 $lateToday = 0;
 $earlyLeaveToday = 0;
@@ -110,29 +113,34 @@ try {
     $stmt = $pdo->query("SELECT COUNT(*) FROM employees");
     $totalEmployees = (int)$stmt->fetchColumn();
 
-    // 2. Present Today
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status IN ('present', 'completed', 'half_day') OR status = 'present')");
+    // 2. Present Today (anyone who checked in or has attendance recorded)
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status IN ('present', 'completed', 'half_day', 'delayed') OR status IN ('present', 'late') OR check_in IS NOT NULL)");
     $stmt->execute([$today]);
-    $presentToday = (int)$stmt->fetchColumn();
+    $totalPresentToday = (int)$stmt->fetchColumn();
+    $presentToday = $totalPresentToday; // Backward compatibility for KPI cards
 
-    // 3. On Leave Today
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'on_leave' OR status = 'on_leave')");
-    $stmt->execute([$today]);
-    $onLeaveToday = (int)$stmt->fetchColumn();
-    
-    $absentToday = max(0, $totalEmployees - $presentToday - $onLeaveToday);
-
-    // 4. Late Employees Today
+    // 3. Late Employees Today
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'delayed' OR status = 'late' OR delay_minutes > 0)");
     $stmt->execute([$today]);
     $lateToday = (int)$stmt->fetchColumn();
 
-    // 5. Early Leave Today
+    // 4. On-time Present Today (present and NOT delayed)
+    $onTimePresentToday = max(0, $totalPresentToday - $lateToday);
+
+    // 5. On Leave Today
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'on_leave' OR status = 'on_leave')");
+    $stmt->execute([$today]);
+    $onLeaveToday = (int)$stmt->fetchColumn();
+    
+    // 6. Absent Today (Total headcount minus everyone who attended or is on leave)
+    $absentToday = max(0, $totalEmployees - $totalPresentToday - $onLeaveToday);
+
+    // 7. Early Leave Today
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'left_early' OR early_exit_minutes > 0)");
     $stmt->execute([$today]);
     $earlyLeaveToday = (int)$stmt->fetchColumn();
 
-    // 6. Monthly Attendance Rate
+    // 8. Monthly Attendance Rate
     $stmt = $pdo->prepare("SELECT attendance_status, status, COUNT(*) as cnt FROM attendance WHERE date BETWEEN ? AND ? GROUP BY attendance_status, status");
     $stmt->execute([$monthStart, $monthEnd]);
     $attStats = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -148,7 +156,7 @@ try {
     }
     $monthlyAttendanceRate = $totalAtt > 0 ? round(($presentAtt / $totalAtt) * 100, 1) : 0;
 
-    // 7. Action Items (Pending Leaves, KYC, Tasks)
+    // 9. Action Items (Pending Leaves, KYC, Tasks)
     $stmtLeaves = $pdo->query("SHOW TABLES LIKE 'leave_requests'");
     if ($stmtLeaves->rowCount() > 0) {
         $pendingLeaves = (int)$pdo->query("SELECT COUNT(*) FROM leave_requests WHERE status = 'pending'")->fetchColumn();
@@ -161,7 +169,7 @@ try {
         $activeTasks = (int)$pdo->query("SELECT COUNT(*) FROM tasks WHERE status IN ('sent', 'in_progress', 'verify')")->fetchColumn();
     }
 
-    // 8. Recent Attendance Activity Feed
+    // 10. Recent Attendance Activity Feed
     $stmt = $pdo->query("
         SELECT a.*, e.first_name, e.last_name, e.avatar, e.department, e.position, e.employee_id as emp_code
         FROM attendance a
@@ -171,7 +179,7 @@ try {
     ");
     $recentAttendance = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // 9. Chart Data: Last 7 Days Attendance
+    // 11. Chart Data: Last 7 Days Attendance (True On-time vs Delayed)
     $chartDates = [];
     $chartPresent = [];
     $chartLate = [];
@@ -179,13 +187,21 @@ try {
         $d = date('Y-m-d', strtotime("-$i days"));
         $chartDates[] = date('M d', strtotime($d));
         
-        $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status IN ('present', 'completed', 'half_day', 'delayed') OR status IN ('present', 'late'))");
+        // Total attendees on that day
+        $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status IN ('present', 'completed', 'half_day', 'delayed') OR status IN ('present', 'late') OR check_in IS NOT NULL)");
         $stmt->execute([$d]);
-        $chartPresent[] = (int)$stmt->fetchColumn();
+        $totAtt = (int)$stmt->fetchColumn();
         
-        $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'delayed' OR delay_minutes > 0)");
+        // Delayed arrivals on that day
+        $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'delayed' OR status = 'late' OR delay_minutes > 0)");
         $stmt->execute([$d]);
-        $chartLate[] = (int)$stmt->fetchColumn();
+        $lateAtt = (int)$stmt->fetchColumn();
+
+        // On-time arrivals (total attendees minus late arrivals)
+        $onTimeAtt = max(0, $totAtt - $lateAtt);
+        
+        $chartPresent[] = $onTimeAtt;
+        $chartLate[] = $lateAtt;
     }
 
 } catch (PDOException $e) {
@@ -1002,10 +1018,19 @@ try {
                 </h2>
                 <p class="chart-panel-desc">Present, absent, and delayed distribution.</p>
             </div>
+            <span class="dash-card-chip" style="font-size: 0.75rem;"><?php echo $totalPresentToday; ?> / <?php echo $totalEmployees; ?> Present</span>
         </div>
 
-        <div class="chart-canvas-container">
+        <div class="chart-canvas-container" style="position: relative;">
             <canvas id="todayChart"></canvas>
+            <div id="todayChartCenter" style="position: absolute; top: 43%; left: 50%; transform: translate(-50%, -50%); text-align: center; pointer-events: none;">
+                <div style="font-family: 'Outfit', sans-serif; font-size: 1.45rem; font-weight: 800; color: var(--adm-text-main); line-height: 1.1;">
+                    <?php echo $totalPresentToday; ?>/<?php echo $totalEmployees; ?>
+                </div>
+                <div style="font-size: 0.70rem; font-weight: 700; color: var(--adm-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px;">
+                    Present
+                </div>
+            </div>
         </div>
     </div>
 
@@ -1151,20 +1176,26 @@ if (typeof Chart === 'undefined') {
         function getChartThemeColors() {
             const isDark = htmlRoot.getAttribute('data-theme') === 'dark';
             return {
+                isDark: isDark,
                 textColor: isDark ? '#94a3b8' : '#64748b',
                 gridColor: isDark ? 'rgba(255, 255, 255, 0.07)' : 'rgba(0, 0, 0, 0.05)',
                 barPresent: '#10b981',
                 barLate: '#f59e0b',
-                donutColors: ['#10b981', '#ef4444', '#f59e0b', '#8b5cf6']
+                donutBorder: isDark ? '#1e293b' : '#ffffff',
+                donutColors: ['#10b981', '#f59e0b', '#ef4444', '#6366f1'] // On-time, Late, Absent, On Leave
             };
         }
 
         let colors = getChartThemeColors();
 
         // ── 1. Attendance Bar Chart (7 Days) ──
-        const ctxAtt = document.getElementById('attendanceChart')?.getContext('2d');
+        const canvasAtt = document.getElementById('attendanceChart');
         let attendanceChart = null;
-        if (ctxAtt) {
+        if (canvasAtt) {
+            const existingAtt = Chart.getChart(canvasAtt);
+            if (existingAtt) existingAtt.destroy();
+
+            const ctxAtt = canvasAtt.getContext('2d');
             attendanceChart = new Chart(ctxAtt, {
                 type: 'bar',
                 data: {
@@ -1234,14 +1265,19 @@ if (typeof Chart === 'undefined') {
         }
 
         // ── 2. Today's Doughnut Chart ──
-        const ctxToday = document.getElementById('todayChart')?.getContext('2d');
+        const canvasToday = document.getElementById('todayChart');
         let todayChart = null;
-        if (ctxToday) {
+        if (canvasToday) {
+            const existingToday = Chart.getChart(canvasToday);
+            if (existingToday) existingToday.destroy();
+
+            const ctxToday = canvasToday.getContext('2d');
+            const totalHeadcount = <?php echo (int)$totalEmployees; ?>;
             const rawTodayData = [
-                <?php echo (int)$presentToday; ?>, 
-                <?php echo (int)$absentToday; ?>, 
+                <?php echo (int)$onTimePresentToday; ?>, 
                 <?php echo (int)$lateToday; ?>, 
-                <?php echo (int)$earlyLeaveToday; ?>
+                <?php echo (int)$absentToday; ?>, 
+                <?php echo (int)$onLeaveToday; ?>
             ];
             const sumToday = rawTodayData.reduce((a, b) => a + b, 0);
             const hasData = sumToday > 0;
@@ -1249,12 +1285,12 @@ if (typeof Chart === 'undefined') {
             todayChart = new Chart(ctxToday, {
                 type: 'doughnut',
                 data: {
-                    labels: hasData ? ['Present', 'Absent', 'Late', 'Early Exit'] : ['No Attendance Logged Yet'],
+                    labels: hasData ? ['On-time Present', 'Late / Delayed', 'Absent', 'On Leave'] : ['No Activity Recorded Yet'],
                     datasets: [{
                         data: hasData ? rawTodayData : [1],
                         backgroundColor: hasData ? colors.donutColors : [colors.gridColor || 'rgba(148, 163, 184, 0.25)'],
                         borderWidth: hasData ? 2 : 1,
-                        borderColor: htmlRoot.getAttribute('data-theme') === 'dark' ? '#1e293b' : '#ffffff',
+                        borderColor: colors.donutBorder,
                         hoverOffset: hasData ? 6 : 0
                     }]
                 },
@@ -1288,7 +1324,7 @@ if (typeof Chart === 'undefined') {
                                 label: function(context) {
                                     if (!hasData) return 'No activity recorded today';
                                     const val = context.raw || 0;
-                                    const pct = sumToday > 0 ? Math.round((val / sumToday) * 100) : 0;
+                                    const pct = totalHeadcount > 0 ? Math.round((val / totalHeadcount) * 100) : (sumToday > 0 ? Math.round((val / sumToday) * 100) : 0);
                                     return ' ' + context.label + ': ' + val + ' (' + pct + '%)';
                                 }
                             }
@@ -1310,12 +1346,12 @@ if (typeof Chart === 'undefined') {
             }
             if (todayChart) {
                 todayChart.options.plugins.legend.labels.color = newColors.textColor;
-                todayChart.data.datasets[0].borderColor = htmlRoot.getAttribute('data-theme') === 'dark' ? '#1e293b' : '#ffffff';
+                todayChart.data.datasets[0].borderColor = newColors.donutBorder;
                 const curSum = [
-                    <?php echo (int)$presentToday; ?>, 
-                    <?php echo (int)$absentToday; ?>, 
+                    <?php echo (int)$onTimePresentToday; ?>, 
                     <?php echo (int)$lateToday; ?>, 
-                    <?php echo (int)$earlyLeaveToday; ?>
+                    <?php echo (int)$absentToday; ?>, 
+                    <?php echo (int)$onLeaveToday; ?>
                 ].reduce((a, b) => a + b, 0);
                 if (curSum > 0) {
                     todayChart.data.datasets[0].backgroundColor = newColors.donutColors;
