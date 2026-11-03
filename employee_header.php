@@ -23,13 +23,36 @@ if (isset($pdo) && $pdo instanceof PDO) {
 $brandLogo = !empty($activeSiteSettings['logo']) ? 'assets/uploads/site/' . rawurlencode($activeSiteSettings['logo']) : null;
 $siteName  = !empty($activeSiteSettings['site_name']) ? $activeSiteSettings['site_name'] : 'Cloud Aspire';
 
-$navLinks = [
-    'employee_attendance' => ['label' => 'Attendance', 'icon' => 'fa-calendar-check'],
-    'employee_project'    => ['label' => 'Projects', 'icon' => 'fa-folder-open'],
-    'employee_task'       => ['label' => 'Tasks', 'icon' => 'fa-list-check'],
-    'employee_leave'      => ['label' => 'Leaves', 'icon' => 'fa-calendar-xmark'],
-    'employee_account'    => ['label' => 'My Account', 'icon' => 'fa-user-gear'],
+// Initialize security utilities and secure session
+if (!class_exists('Security')) {
+    require_once __DIR__ . '/app/security.php';
+}
+if (isset($pdo) && $pdo instanceof PDO) {
+    Security::init($pdo);
+}
+Security::initSecureSession();
+
+// Determine current user ID and assigned role
+$currentEmpId = $_SESSION['employee_id'] ?? ($_SESSION['admin_id'] ?? null);
+$empRoleName  = $_SESSION['role_name'] ?? 'Staff';
+$isAdminUser  = !empty($_SESSION['admin_logged_in']);
+
+// Full catalog of employee portal navigation links with module permissions
+$allEmpNavLinks = [
+    'employee_attendance' => ['label' => 'Attendance', 'icon' => 'fa-calendar-check', 'perm' => 'attendance.view'],
+    'employee_project'    => ['label' => 'Projects',   'icon' => 'fa-folder-open',    'perm' => 'projects.view'],
+    'employee_task'       => ['label' => 'Tasks',      'icon' => 'fa-list-check',     'perm' => 'tasks.view'],
+    'employee_leave'      => ['label' => 'Leaves',     'icon' => 'fa-calendar-xmark', 'perm' => 'leaves.view'],
+    'employee_account'    => ['label' => 'My Account', 'icon' => 'fa-user-gear',      'perm' => null],
 ];
+
+// Role-based navigation filtering: only authorized modules appear in the menu
+$navLinks = [];
+foreach ($allEmpNavLinks as $pageKey => $item) {
+    if (empty($item['perm']) || Security::hasPermission($item['perm'], $currentEmpId)) {
+        $navLinks[$pageKey] = $item;
+    }
+}
 ?>
 
 <!-- ===== NAVBAR STYLES ===== -->
@@ -127,23 +150,26 @@ html[data-theme="dark"] {
     flex-shrink: 0;
 }
 .emp-nav-brand img {
-    height: 38px;
-    max-width: 150px;
+    height: 48px;
+    max-height: 48px;
+    max-width: 220px;
+    width: auto;
     object-fit: contain;
+    image-rendering: -webkit-optimize-contrast;
     transition: transform var(--emp-transition);
 }
 .emp-nav-brand:hover img { transform: scale(1.04); }
 .emp-nav-brand-icon {
-    width: 36px; height: 36px;
+    width: 40px; height: 40px;
     background: linear-gradient(135deg, #4f46e5, #6366f1);
     border-radius: var(--emp-radius-sm);
     display: flex; align-items: center; justify-content: center;
     color: #fff;
-    font-size: 1.05rem;
+    font-size: 1.15rem;
     box-shadow: 0 4px 10px rgba(79, 70, 229, 0.25);
 }
 .emp-nav-brand-name {
-    font-size: 1.15rem;
+    font-size: 1.18rem;
     font-weight: 800;
     color: var(--emp-text-main);
     letter-spacing: -0.02em;
@@ -483,6 +509,7 @@ html[data-theme="dark"] .emp-nav-code-badge {
 
 @media (max-width: 540px) {
     .emp-navbar { padding: 0 14px; height: 62px; }
+    .emp-nav-brand img { height: 42px; max-height: 42px; max-width: 170px; }
     .emp-nav-brand-name { font-size: 1rem; }
     .emp-nav-badge { display: none; }
 }
@@ -490,6 +517,7 @@ html[data-theme="dark"] .emp-nav-code-badge {
 @media (max-width: 480px) {
     .emp-navbar { padding: 0 12px; }
     .emp-nav-brand { gap: 8px; }
+    .emp-nav-brand img { height: 38px; max-height: 38px; max-width: 150px; }
     .emp-nav-actions { gap: 8px; }
 }
 
@@ -511,22 +539,6 @@ html[data-theme="dark"] .emp-nav-code-badge {
 .emp-drawer-user .emp-btn-logout:hover {
     background: var(--emp-logout-hover);
     color: #991b1b;
-}
-
-/* Dedicated red logout item inside the mobile drawer links */
-.emp-drawer-link-logout {
-    color: var(--emp-logout-color) !important;
-    font-weight: 700;
-    border-top: 1px dashed var(--emp-border);
-    margin-top: 6px;
-    padding-top: 12px;
-}
-.emp-drawer-link-logout i {
-    color: var(--emp-logout-color) !important;
-}
-.emp-drawer-link-logout:hover {
-    background: var(--emp-logout-bg) !important;
-    color: #991b1b !important;
 }
 
 /* Remove Dashboard from employee portal navigation menus (desktop & mobile) */
@@ -567,6 +579,13 @@ html[data-theme="dark"] .emp-nav-code-badge {
 
         <!-- Right Side Actions: Theme Toggle, User, Logout -->
         <div class="emp-nav-actions">
+            <?php if ($isAdminUser): ?>
+                <a href="/admin/dashboard" class="emp-nav-admin-badge" title="Access Admin Console" style="display:inline-flex; align-items:center; gap:6px; padding:6px 12px; font-size:0.78rem; font-weight:700; color:#fff; background:linear-gradient(135deg, #4f46e5, #6366f1); border-radius:var(--emp-radius-pill); text-decoration:none; box-shadow:0 2px 6px rgba(79,70,229,0.3); transition:transform 0.2s ease;">
+                    <i class="fa-solid fa-gauge-high"></i>
+                    <span>Admin Panel</span>
+                </a>
+            <?php endif; ?>
+
             <!-- Theme Toggle Button -->
             <button class="emp-theme-btn" id="empThemeToggle" aria-label="Toggle theme mode" title="Toggle dark/light theme">
                 <i class="fas fa-sun icon-sun"></i>
@@ -574,7 +593,7 @@ html[data-theme="dark"] .emp-nav-code-badge {
             </button>
 
             <!-- User Greeting & Profile Shortcut -->
-            <a href="employee_account" class="emp-user-profile-link" title="Manage Account & Settings">
+            <a href="employee_account" class="emp-user-profile-link" title="Manage Account & Settings (Role: <?php echo htmlspecialchars($empRoleName); ?>)">
                 <div class="emp-user-avatar">
                     <?php 
                         $empName = $_SESSION['employee_name'] ?? 'Employee';
@@ -587,6 +606,7 @@ html[data-theme="dark"] .emp-nav-code-badge {
                 <?php if (!empty($_SESSION['employee_code'])): ?>
                     <span class="emp-nav-code-badge" title="Employee Code"><?php echo htmlspecialchars($_SESSION['employee_code']); ?></span>
                 <?php endif; ?>
+                <span class="emp-nav-code-badge" style="background:rgba(79,70,229,0.12); color:var(--emp-primary); border:1px solid rgba(79,70,229,0.25);" title="Assigned Role"><?php echo htmlspecialchars($empRoleName); ?></span>
             </a>
 
             <!-- Logout Button (Visible on both Desktop & Mobile) -->
@@ -609,6 +629,12 @@ html[data-theme="dark"] .emp-nav-code-badge {
 <!-- Mobile Navigation Drawer -->
 <div class="emp-nav-drawer" id="empNavDrawer" role="dialog" aria-label="Mobile navigation drawer" aria-hidden="true">
     <div class="emp-drawer-links">
+        <?php if ($isAdminUser): ?>
+            <a href="/admin/dashboard" class="emp-drawer-link" style="color:var(--emp-primary); font-weight:700; background:rgba(79, 70, 229, 0.08); margin-bottom:8px;">
+                <i class="fa-solid fa-gauge-high"></i>
+                <span>Admin Console</span>
+            </a>
+        <?php endif; ?>
         <?php foreach ($navLinks as $href => $item): ?>
             <?php if ($href === 'employee_dashboard') continue; // Remove Dashboard from mobile view menu ?>
             <a href="<?php echo $href; ?>"
@@ -617,12 +643,6 @@ html[data-theme="dark"] .emp-nav-code-badge {
                 <span><?php echo htmlspecialchars($item['label']); ?></span>
             </a>
         <?php endforeach; ?>
-
-        <!-- Direct Logout Option in Navigation Links -->
-        <a href="employee_logout" class="emp-drawer-link emp-drawer-link-logout" title="Sign out of portal">
-            <i class="fas fa-arrow-right-from-bracket"></i>
-            <span>Logout</span>
-        </a>
     </div>
 
     <hr class="emp-drawer-divider">

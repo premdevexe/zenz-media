@@ -28,6 +28,15 @@ if (!Security::setSessionTimeout()) {
 }
 
 $employee_id = (int)$_SESSION['employee_id'];
+
+// Enforce role-based permission server-side
+if (!Security::hasPermission('attendance.view', $employee_id)) {
+    $_SESSION['dash_notice'] = "Access Denied: Your assigned role does not possess permissions to access Attendance.";
+    $_SESSION['dash_notice_type'] = "error";
+    header("Location: employee_dashboard");
+    exit();
+}
+
 $today = date('Y-m-d');
 $currentTime = date('H:i:s');
 

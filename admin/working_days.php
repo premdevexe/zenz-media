@@ -1,6 +1,6 @@
 <?php
 // ============================================================================
-// Enterprise White-Label SaaS Monthly Working Days & Company Calendar
+// Enterprise SaaS Monthly Working Days & Calendar - Minimal & Clean
 // ============================================================================
 
 date_default_timezone_set('Asia/Kolkata');
@@ -20,11 +20,11 @@ if (!Security::isAuthenticated()) {
 $adminId = (int)($_SESSION['admin_id'] ?? 1);
 $canView = Security::hasPermission('shifts.view', $adminId) || Security::hasPermission('attendance.view', $adminId) || Security::hasPermission('settings.view', $adminId);
 if (!$canView) {
-    Security::requirePermission('shifts.view', $adminId);
+    Security::requirePermission('shifts.view', $adminId, '../admin/dashboard');
 }
 $canManage = Security::hasPermission('shifts.manage', $adminId) || Security::hasPermission('attendance.manage', $adminId) || Security::hasPermission('settings.manage', $adminId);
 
-$pageTitle = 'Monthly Working Days & Calendar';
+$pageTitle = 'Monthly Working Days';
 $currentPage = 'working_days';
 
 // ----------------------------------------------------------------------------
@@ -33,21 +33,20 @@ $currentPage = 'working_days';
 $selectedYear  = isset($_GET['year']) ? (int)$_GET['year'] : (int)date('Y');
 $selectedMonth = isset($_GET['month']) ? (int)$_GET['month'] : (int)date('n');
 
-if ($selectedYear < 2020 || $selectedYear > 2040) {
+if ($selectedYear < 2000 || $selectedYear > 2099) {
     $selectedYear = (int)date('Y');
 }
 if ($selectedMonth < 1 || $selectedMonth > 12) {
     $selectedMonth = (int)date('n');
 }
 
-// Compute calendar details
+// Compute calendar details with leap year & month length handling
 $firstDayTimestamp = mktime(0, 0, 0, $selectedMonth, 1, $selectedYear);
 $daysInMonth       = (int)date('t', $firstDayTimestamp);
 $firstDayOfWeek    = (int)date('w', $firstDayTimestamp); // 0 (Sun) to 6 (Sat)
 $monthName         = date('F', $firstDayTimestamp);
-$yearMonthStr      = sprintf('%04d-%02d', $selectedYear, $selectedMonth);
 
-// Previous and Next month links
+// Navigation links: Previous and Next Month (with year boundary wrapping)
 $prevMonth = $selectedMonth - 1;
 $prevYear  = $selectedYear;
 if ($prevMonth < 1) {
@@ -69,7 +68,7 @@ $flashMessage = $_SESSION['working_days_flash'] ?? '';
 $flashType    = $_SESSION['working_days_flash_type'] ?? '';
 unset($_SESSION['working_days_flash'], $_SESSION['working_days_flash_type']);
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
     if (!isset($_POST['csrf_token']) || !Security::validateCSRFToken($_POST['csrf_token'], 'working_days')) {
         $_SESSION['working_days_flash'] = 'Invalid or expired security token. Please refresh and try again.';
         $_SESSION['working_days_flash_type'] = 'error';
@@ -86,7 +85,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     $action = $_POST['action'];
 
-    // Action 1: Save All Days for the Month
+    // Action: Save Days for the Month
     if ($action === 'save_month') {
         $daysData = $_POST['days'] ?? [];
         if (!is_array($daysData) || empty($daysData)) {
@@ -137,7 +136,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     'days_updated' => $savedCount
                 ]);
 
-                $_SESSION['working_days_flash'] = "Successfully updated {$savedCount} calendar days for {$monthName} {$selectedYear}.";
+                $_SESSION['working_days_flash'] = "Calendar settings for {$monthName} {$selectedYear} saved successfully ({$savedCount} days updated).";
                 $_SESSION['working_days_flash_type'] = 'success';
             } catch (Exception $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
@@ -145,61 +144,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $_SESSION['working_days_flash'] = 'Database error occurred while saving calendar settings.';
                 $_SESSION['working_days_flash_type'] = 'error';
             }
-        }
-        header("Location: working_days?year={$selectedYear}&month={$selectedMonth}");
-        exit();
-    }
-
-    // Action 2: Auto-populate Standard Month (Sundays Off, Weekdays Working)
-    elseif ($action === 'auto_populate') {
-        $mode = $_POST['auto_mode'] ?? 'sundays_off'; // 'sundays_off' or 'sundays_saturdays_off'
-        try {
-            $pdo->beginTransaction();
-
-            $stmtUpsert = $pdo->prepare("
-                INSERT INTO monthly_working_days (`date`, `year`, `month`, `day_type`, `title`, `notes`)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON DUPLICATE KEY UPDATE 
-                    `day_type` = VALUES(`day_type`),
-                    `title`    = VALUES(`title`),
-                    `notes`    = VALUES(`notes`),
-                    `updated_at` = CURRENT_TIMESTAMP
-            ");
-
-            for ($day = 1; $day <= $daysInMonth; $day++) {
-                $dateStr = sprintf('%04d-%02d-%02d', $selectedYear, $selectedMonth, $day);
-                $w = (int)date('w', strtotime($dateStr)); // 0 = Sun, 6 = Sat
-
-                if ($w === 0) {
-                    $type = 'weekly_off';
-                    $title = 'Sunday Off';
-                } elseif ($w === 6 && $mode === 'sundays_saturdays_off') {
-                    $type = 'weekly_off';
-                    $title = 'Saturday Off';
-                } else {
-                    $type = 'working_day';
-                    $title = null;
-                }
-
-                $stmtUpsert->execute([
-                    $dateStr,
-                    $selectedYear,
-                    $selectedMonth,
-                    $type,
-                    $title,
-                    null
-                ]);
-            }
-
-            $pdo->commit();
-
-            $_SESSION['working_days_flash'] = "Standard working schedule generated for {$monthName} {$selectedYear}.";
-            $_SESSION['working_days_flash_type'] = 'success';
-        } catch (Exception $e) {
-            if ($pdo->inTransaction()) $pdo->rollBack();
-            error_log("Error auto-populating working days: " . $e->getMessage());
-            $_SESSION['working_days_flash'] = 'Error generating calendar schedule.';
-            $_SESSION['working_days_flash_type'] = 'error';
         }
         header("Location: working_days?year={$selectedYear}&month={$selectedMonth}");
         exit();
@@ -222,7 +166,7 @@ try {
 }
 
 // ----------------------------------------------------------------------------
-// Calculate Totals for the Selected Month
+// Calculate Summary Counts for Selected Month
 // ----------------------------------------------------------------------------
 $totalDays = $daysInMonth;
 $workingDaysCount = 0;
@@ -234,7 +178,7 @@ for ($day = 1; $day <= $daysInMonth; $day++) {
     if (isset($savedDays[$day])) {
         $type = $savedDays[$day]['day_type'];
     } else {
-        // Fallback default: Sundays are weekly_off, rest are working_day
+        // Automatic default: Sundays are weekly off, Monday-Saturday are working days
         $w = (int)date('w', strtotime($dateStr));
         $type = ($w === 0) ? 'weekly_off' : 'working_day';
     }
@@ -253,567 +197,584 @@ include __DIR__ . '/header.php';
 ?>
 
 <style>
-/* ── Working Days & Calendar Styles ── */
-.wd-container {
+/* ── Minimal Clean Monthly Working Days Layout ── */
+.mwd-wrap {
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 12px;
+    max-width: 1200px;
+    margin: 0 auto;
 }
 
-.wd-hero {
+/* ── Compact Header Bar ── */
+.mwd-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
-    gap: 16px;
+    gap: 12px;
     background: var(--adm-surface);
     border: 1px solid var(--adm-border);
-    border-radius: var(--adm-radius-xl);
-    padding: 24px;
-    box-shadow: var(--adm-shadow-card);
+    border-radius: var(--adm-radius-lg);
+    padding: 10px 16px;
+    box-shadow: var(--adm-shadow-sm);
 }
 
-.wd-hero-title h1 {
-    font-family: 'Outfit', sans-serif;
-    font-size: 1.65rem;
-    font-weight: 700;
-    color: var(--adm-text-title);
-    margin: 0 0 6px 0;
+.mwd-header-left {
     display: flex;
     align-items: center;
-    gap: 10px;
-}
-
-.wd-hero-title p {
-    margin: 0;
-    color: var(--adm-text-muted);
-    font-size: 0.92rem;
-}
-
-.wd-month-picker-bar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
+    gap: 16px;
     flex-wrap: wrap;
 }
 
-.wd-month-picker-bar .btn-nav {
+.mwd-title {
+    font-family: 'Outfit', sans-serif;
+    font-size: 1.22rem;
+    font-weight: 700;
+    color: var(--adm-text-main);
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.mwd-title i {
+    color: var(--adm-brand);
+    font-size: 1.15rem;
+}
+
+/* ── Month & Year Nav Controls ── */
+.mwd-nav {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.mwd-btn-icon {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 38px;
-    height: 38px;
-    border-radius: var(--adm-radius-md);
+    width: 30px;
+    height: 30px;
+    border-radius: var(--adm-radius-sm);
     background: var(--adm-surface-subtle);
     border: 1px solid var(--adm-border);
-    color: var(--adm-text-title);
+    color: var(--adm-text-main);
     text-decoration: none;
-    font-weight: 600;
-    transition: all 0.2s;
+    font-size: 0.8rem;
+    transition: all 0.15s ease;
 }
-
-.wd-month-picker-bar .btn-nav:hover {
+.mwd-btn-icon:hover {
     background: var(--adm-brand-light);
     border-color: var(--adm-brand);
     color: var(--adm-brand);
 }
 
-.wd-select-wrap {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.wd-select {
-    padding: 8px 14px;
-    border-radius: var(--adm-radius-md);
+.mwd-select {
+    height: 30px;
+    padding: 2px 8px;
+    border-radius: var(--adm-radius-sm);
     border: 1px solid var(--adm-border);
     background: var(--adm-surface);
-    color: var(--adm-text-title);
+    color: var(--adm-text-main);
     font-family: inherit;
-    font-size: 0.92rem;
+    font-size: 0.82rem;
     font-weight: 600;
     cursor: pointer;
     outline: none;
-    transition: border-color 0.2s;
+    transition: border-color 0.15s;
 }
-
-.wd-select:focus {
+.mwd-select:focus {
     border-color: var(--adm-brand);
 }
 
-/* ── KPI Stat Cards ── */
-.wd-stats-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 18px;
-}
-
-.wd-stat-card {
-    background: var(--adm-surface);
-    border: 1px solid var(--adm-border);
-    border-radius: var(--adm-radius-lg);
-    padding: 20px;
-    box-shadow: var(--adm-shadow-card);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    transition: transform 0.2s, box-shadow 0.2s;
-}
-
-.wd-stat-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
-}
-
-.wd-stat-info .wd-stat-label {
-    font-size: 0.8rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--adm-text-muted);
-    display: block;
-    margin-bottom: 4px;
-}
-
-.wd-stat-info .wd-stat-val {
-    font-family: 'Outfit', sans-serif;
-    font-size: 1.85rem;
-    font-weight: 800;
-    color: var(--adm-text-title);
-    line-height: 1.1;
-}
-
-.wd-stat-info .wd-stat-sub {
-    font-size: 0.8rem;
-    color: var(--adm-text-muted);
-    margin-top: 4px;
-    display: block;
-}
-
-.wd-stat-icon {
-    width: 48px;
-    height: 48px;
-    border-radius: var(--adm-radius-lg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.3rem;
-    flex-shrink: 0;
-}
-
-.wd-stat-total .wd-stat-icon { background: rgba(79, 70, 229, 0.1); color: #4f46e5; }
-.wd-stat-working .wd-stat-icon { background: rgba(16, 185, 129, 0.1); color: #10b981; }
-.wd-stat-offs .wd-stat-icon { background: rgba(245, 158, 11, 0.1); color: #f59e0b; }
-.wd-stat-holidays .wd-stat-icon { background: rgba(236, 72, 153, 0.1); color: #ec4899; }
-
-/* ── Action Toolbar ── */
-.wd-toolbar {
-    background: var(--adm-surface);
-    border: 1px solid var(--adm-border);
-    border-radius: var(--adm-radius-lg);
-    padding: 14px 20px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    flex-wrap: wrap;
-    box-shadow: var(--adm-shadow-card);
-}
-
-.wd-toolbar-left {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-}
-
-.btn-auto {
+.mwd-btn-subtle {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 16px;
-    border-radius: var(--adm-radius-md);
-    background: var(--adm-surface-subtle);
-    border: 1px solid var(--adm-border);
-    color: var(--adm-text-title);
-    font-size: 0.85rem;
+    padding: 2px 8px;
+    height: 30px;
+    font-size: 0.78rem;
     font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
+    color: var(--adm-brand);
+    background: var(--adm-brand-light);
+    border: 1px solid var(--adm-brand-border);
+    border-radius: var(--adm-radius-sm);
+    text-decoration: none;
+    transition: all 0.15s;
+}
+.mwd-btn-subtle:hover {
+    background: var(--adm-brand);
+    color: #fff;
 }
 
-.btn-auto:hover {
-    background: var(--adm-brand-light);
+.mwd-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.mwd-btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    height: 32px;
+    border-radius: var(--adm-radius-sm);
+    background: var(--adm-surface-subtle);
+    border: 1px solid var(--adm-border);
+    color: var(--adm-text-body);
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.mwd-btn-ghost:hover {
+    background: var(--adm-surface);
     border-color: var(--adm-brand);
     color: var(--adm-brand);
 }
 
-.btn-save-cal {
+.mwd-btn-primary {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 10px 22px;
-    border-radius: var(--adm-radius-md);
-    background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+    gap: 6px;
+    padding: 6px 16px;
+    height: 32px;
+    border-radius: var(--adm-radius-sm);
+    background: var(--adm-brand-gradient);
     border: none;
     color: #fff;
-    font-size: 0.9rem;
+    font-family: inherit;
+    font-size: 0.82rem;
     font-weight: 700;
     cursor: pointer;
-    box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35);
-    transition: all 0.2s;
+    box-shadow: 0 2px 6px rgba(79, 70, 229, 0.25);
+    transition: all 0.15s;
+}
+.mwd-btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(79, 70, 229, 0.35);
 }
 
-.btn-save-cal:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 18px rgba(79, 70, 229, 0.45);
-}
-
-/* ── Calendar Grid ── */
-.wd-calendar-card {
+/* ── Compact Automatic Summary Bar ── */
+.mwd-summary-bar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
     background: var(--adm-surface);
     border: 1px solid var(--adm-border);
-    border-radius: var(--adm-radius-xl);
-    padding: 24px;
-    box-shadow: var(--adm-shadow-card);
+    border-radius: var(--adm-radius-md);
+    padding: 8px 16px;
+    font-size: 0.82rem;
+    box-shadow: var(--adm-shadow-sm);
 }
 
-.wd-weekdays-header {
+.mwd-summary-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.mwd-summary-label {
+    color: var(--adm-muted);
+    font-weight: 500;
+}
+
+.mwd-summary-val {
+    color: var(--adm-text-main);
+    font-weight: 700;
+}
+
+.mwd-summary-sep {
+    width: 1px;
+    height: 16px;
+    background: var(--adm-border);
+}
+
+.mwd-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.dot-working { background: #10b981; box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2); }
+.dot-off     { background: #f59e0b; box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2); }
+.dot-holiday { background: #e11d48; box-shadow: 0 0 0 2px rgba(225, 29, 72, 0.2); }
+
+/* ── Calendar Card & Grid ── */
+.mwd-calendar-card {
+    background: var(--adm-surface);
+    border: 1px solid var(--adm-border);
+    border-radius: var(--adm-radius-lg);
+    padding: 12px;
+    box-shadow: var(--adm-shadow-sm);
+}
+
+.mwd-weekdays {
     display: grid;
     grid-template-columns: repeat(7, 1fr);
-    gap: 12px;
-    margin-bottom: 12px;
+    gap: 6px;
+    margin-bottom: 6px;
     text-align: center;
 }
 
-.wd-weekday-label {
-    font-size: 0.8rem;
+.mwd-weekday {
+    font-size: 0.74rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--adm-text-muted);
-    padding: 8px 0;
+    letter-spacing: 0.4px;
+    color: var(--adm-muted);
+    padding: 6px 0;
+}
+.mwd-weekday.is-sunday {
+    color: #d97706;
 }
 
-.wd-weekday-label.weekend {
-    color: #f59e0b;
-}
-
-.wd-days-grid {
+.mwd-grid {
     display: grid;
     grid-template-columns: repeat(7, 1fr);
-    gap: 12px;
+    gap: 6px;
 }
 
-.wd-cell-empty {
-    min-height: 110px;
+.mwd-cell-empty {
+    min-height: 68px;
     background: var(--adm-surface-subtle);
-    border: 1px dashed var(--adm-border);
-    border-radius: var(--adm-radius-lg);
-    opacity: 0.45;
+    border: 1px dashed var(--adm-border-subtle);
+    border-radius: var(--adm-radius-sm);
+    opacity: 0.4;
 }
 
-.wd-day-cell {
-    min-height: 120px;
+.mwd-cell {
+    min-height: 68px;
     background: var(--adm-surface);
-    border: 1.5px solid var(--adm-border);
-    border-radius: var(--adm-radius-lg);
-    padding: 12px;
+    border: 1px solid var(--adm-border);
+    border-radius: var(--adm-radius-sm);
+    padding: 6px 8px;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    transition: all 0.2s;
-    position: relative;
+    gap: 4px;
+    transition: all 0.15s ease;
+    box-sizing: border-box;
 }
 
-.wd-day-cell:hover {
+.mwd-cell:hover {
     border-color: var(--adm-brand);
-    box-shadow: var(--adm-shadow-md);
+    box-shadow: var(--adm-shadow-sm);
 }
 
-.wd-day-cell.type-working_day {
-    border-left: 4px solid #10b981;
-    background: rgba(16, 185, 129, 0.02);
+/* Distinct visual colors for day types */
+.mwd-cell.type-working_day {
+    border-top: 3px solid #10b981;
+}
+.mwd-cell.type-weekly_off {
+    border-top: 3px solid #f59e0b;
+    background: rgba(245, 158, 11, 0.02);
+}
+.mwd-cell.type-holiday {
+    border-top: 3px solid #e11d48;
+    background: rgba(225, 29, 72, 0.03);
 }
 
-.wd-day-cell.type-weekly_off {
-    border-left: 4px solid #f59e0b;
-    background: rgba(245, 158, 11, 0.03);
-}
-
-.wd-day-cell.type-holiday {
-    border-left: 4px solid #ec4899;
-    background: rgba(236, 72, 153, 0.04);
-}
-
-.wd-day-cell.is-today {
+.mwd-cell.is-today {
     box-shadow: 0 0 0 2px var(--adm-brand);
 }
 
-.wd-day-top {
+.mwd-cell-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 8px;
 }
 
-.wd-day-num {
+.mwd-day-num {
     font-family: 'Outfit', sans-serif;
-    font-size: 1.25rem;
+    font-size: 0.96rem;
     font-weight: 800;
-    color: var(--adm-text-title);
+    color: var(--adm-text-main);
     line-height: 1;
 }
 
-.wd-day-weekday {
-    font-size: 0.72rem;
+.mwd-today-badge {
+    font-size: 0.60rem;
     font-weight: 700;
+    color: #fff;
+    background: var(--adm-brand);
+    border-radius: 9999px;
+    padding: 1px 5px;
     text-transform: uppercase;
-    color: var(--adm-text-muted);
+    letter-spacing: 0.3px;
 }
 
-.wd-day-type-select {
+.mwd-cell-content {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+/* Status Type Selector */
+.mwd-type-select {
     width: 100%;
-    padding: 6px 8px;
-    font-size: 0.8rem;
+    height: 25px;
+    padding: 1px 6px;
+    border-radius: var(--adm-radius-sm);
+    font-family: inherit;
+    font-size: 0.74rem;
     font-weight: 600;
-    border-radius: var(--adm-radius-sm);
-    border: 1px solid var(--adm-border);
-    background: var(--adm-surface);
-    color: var(--adm-text-title);
-    margin-bottom: 6px;
     cursor: pointer;
-    font-family: inherit;
+    outline: none;
+    transition: all 0.15s;
+    border: 1px solid transparent;
 }
 
-.wd-day-title-input {
+.mwd-type-select.type-working_day {
+    background: #ecfdf5;
+    color: #047857;
+    border-color: rgba(5, 150, 105, 0.28);
+}
+.mwd-type-select.type-weekly_off {
+    background: #fffbeb;
+    color: #b45309;
+    border-color: rgba(217, 119, 6, 0.28);
+}
+.mwd-type-select.type-holiday {
+    background: #fff1f2;
+    color: #be123c;
+    border-color: rgba(225, 29, 72, 0.28);
+}
+
+/* Dark mode theme overrides */
+[data-theme="dark"] .mwd-type-select.type-working_day {
+    background: rgba(16, 185, 129, 0.16);
+    color: #34d399;
+    border-color: rgba(16, 185, 129, 0.32);
+}
+[data-theme="dark"] .mwd-type-select.type-weekly_off {
+    background: rgba(245, 158, 11, 0.16);
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.32);
+}
+[data-theme="dark"] .mwd-type-select.type-holiday {
+    background: rgba(225, 29, 72, 0.16);
+    color: #fb7185;
+    border-color: rgba(225, 29, 72, 0.32);
+}
+
+/* Holiday Title Input (Compact & only shown when Holiday is marked) */
+.mwd-holiday-wrap {
+    margin-top: 1px;
+}
+
+.mwd-holiday-input {
     width: 100%;
-    padding: 5px 8px;
-    font-size: 0.78rem;
+    height: 22px;
+    padding: 2px 6px;
+    font-size: 0.70rem;
+    font-family: inherit;
     border-radius: var(--adm-radius-sm);
     border: 1px solid var(--adm-border);
-    background: var(--adm-surface-subtle);
-    color: var(--adm-text-title);
-    box-sizing: border-box;
-    font-family: inherit;
-}
-
-.wd-day-title-input:focus {
-    border-color: var(--adm-brand);
     background: var(--adm-surface);
+    color: var(--adm-text-main);
+    box-sizing: border-box;
+    transition: border-color 0.15s;
+}
+.mwd-holiday-input:focus {
+    border-color: #e11d48;
     outline: none;
 }
 
-/* ── Responsive Rules ── */
-@media (max-width: 1100px) {
-    .wd-stats-grid { grid-template-columns: repeat(2, 1fr); }
-}
-
+/* ── Responsive Styling ── */
 @media (max-width: 768px) {
-    .wd-weekdays-header { display: none; }
-    .wd-days-grid { grid-template-columns: repeat(2, 1fr); }
-    .wd-cell-empty { display: none; }
+    .mwd-header { padding: 10px 12px; }
+    .mwd-grid { gap: 4px; }
+    .mwd-cell { min-height: 60px; padding: 4px 5px; }
+    .mwd-day-num { font-size: 0.88rem; }
+    .mwd-type-select { font-size: 0.68rem; height: 23px; padding: 1px 3px; }
+    .mwd-weekday { font-size: 0.68rem; }
 }
 
 @media (max-width: 520px) {
-    .wd-stats-grid { grid-template-columns: 1fr; }
-    .wd-days-grid { grid-template-columns: 1fr; }
-    .wd-hero { padding: 16px; }
+    .mwd-header-left { gap: 10px; width: 100%; justify-content: space-between; }
+    .mwd-header-actions { width: 100%; justify-content: flex-end; }
+    .mwd-summary-bar { gap: 8px; font-size: 0.76rem; }
+    .mwd-summary-sep { display: none; }
+    .mwd-grid { gap: 3px; }
+    .mwd-cell { min-height: 52px; padding: 3px 3px; }
+    .mwd-day-num { font-size: 0.82rem; }
+    .mwd-type-select { font-size: 0.62rem; height: 22px; }
 }
 </style>
 
-<div class="wd-container">
-
-    <!-- ── Hero Banner ── -->
-    <div class="wd-hero">
-        <div class="wd-hero-title">
-            <h1>
-                <i class="fa-solid fa-calendar-days" style="color: #4f46e5;"></i>
-                <span>Monthly Working Days</span>
-            </h1>
-            <p>Configure operational business days, weekly offs, and holidays for workforce attendance and payroll</p>
-        </div>
-
-        <!-- Month & Year Navigation -->
-        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-            <div class="wd-month-picker-bar">
-                <a href="?year=<?php echo $prevYear; ?>&month=<?php echo $prevMonth; ?>" class="btn-nav" title="Previous Month">
-                    <i class="fa-solid fa-chevron-left"></i>
-                </a>
-
-                <form method="get" class="wd-select-wrap">
-                    <select name="month" class="wd-select" onchange="this.form.submit()">
-                        <?php for ($m = 1; $m <= 12; $m++): ?>
-                            <option value="<?php echo $m; ?>" <?php echo $m === $selectedMonth ? 'selected' : ''; ?>>
-                                <?php echo date('F', mktime(0, 0, 0, $m, 1, 2000)); ?>
-                            </option>
-                        <?php endfor; ?>
-                    </select>
-
-                    <select name="year" class="wd-select" onchange="this.form.submit()">
-                        <?php for ($y = date('Y') - 2; $y <= date('Y') + 3; $y++): ?>
-                            <option value="<?php echo $y; ?>" <?php echo $y === $selectedYear ? 'selected' : ''; ?>>
-                                <?php echo $y; ?>
-                            </option>
-                        <?php endfor; ?>
-                    </select>
-                </form>
-
-                <a href="?year=<?php echo $nextYear; ?>&month=<?php echo $nextMonth; ?>" class="btn-nav" title="Next Month">
-                    <i class="fa-solid fa-chevron-right"></i>
-                </a>
-            </div>
-
-            <a href="attendance" class="btn btn-secondary" style="text-decoration: none; display: inline-flex; align-items: center; gap: 8px; border-radius: var(--adm-radius-lg); height: 42px; padding: 0 16px;">
-                <i class="fa-solid fa-calendar-check"></i>
-                <span>Attendance Log</span>
-            </a>
-        </div>
-    </div>
+<div class="mwd-wrap">
 
     <!-- ── Flash Notifications ── -->
     <?php if (!empty($flashMessage)): ?>
-        <div class="alert alert-<?php echo ($flashType === 'success') ? 'success' : 'danger'; ?>" role="alert">
+        <div class="alert alert-<?php echo ($flashType === 'success') ? 'success' : 'danger'; ?>" role="alert" style="margin-bottom: 0;">
             <i class="fa-solid <?php echo ($flashType === 'success') ? 'fa-circle-check' : 'fa-triangle-exclamation'; ?>"></i>
             <div><?php echo htmlspecialchars($flashMessage); ?></div>
         </div>
     <?php endif; ?>
 
-    <!-- ── KPI Stat Cards ── -->
-    <div class="wd-stats-grid">
-        <div class="wd-stat-card wd-stat-total">
-            <div class="wd-stat-info">
-                <span class="wd-stat-label">Total Days</span>
-                <span class="wd-stat-val"><?php echo $totalDays; ?></span>
-                <span class="wd-stat-sub"><?php echo $monthName . ' ' . $selectedYear; ?></span>
-            </div>
-            <div class="wd-stat-icon">
-                <i class="fa-solid fa-calendar"></i>
+    <!-- ── Compact Header & Month Navigation ── -->
+    <div class="mwd-header">
+        <div class="mwd-header-left">
+            <h1 class="mwd-title">
+                <i class="fa-solid fa-calendar-days"></i>
+                <span>Monthly Working Days</span>
+            </h1>
+
+            <div class="mwd-nav">
+                <a href="?year=<?php echo $prevYear; ?>&month=<?php echo $prevMonth; ?>" class="mwd-btn-icon" title="Previous Month">
+                    <i class="fa-solid fa-chevron-left"></i>
+                </a>
+
+                <select id="navMonth" class="mwd-select" onchange="jumpToMonth()">
+                    <?php for ($m = 1; $m <= 12; $m++): ?>
+                        <option value="<?php echo $m; ?>" <?php echo $m === $selectedMonth ? 'selected' : ''; ?>>
+                            <?php echo date('F', mktime(0, 0, 0, $m, 1, 2000)); ?>
+                        </option>
+                    <?php endfor; ?>
+                </select>
+
+                <select id="navYear" class="mwd-select" onchange="jumpToMonth()">
+                    <?php 
+                    $curY = (int)date('Y');
+                    for ($y = $curY - 3; $y <= $curY + 5; $y++): ?>
+                        <option value="<?php echo $y; ?>" <?php echo $y === $selectedYear ? 'selected' : ''; ?>>
+                            <?php echo $y; ?>
+                        </option>
+                    <?php endfor; ?>
+                </select>
+
+                <a href="?year=<?php echo $nextYear; ?>&month=<?php echo $nextMonth; ?>" class="mwd-btn-icon" title="Next Month">
+                    <i class="fa-solid fa-chevron-right"></i>
+                </a>
+
+                <?php if ($selectedYear !== (int)date('Y') || $selectedMonth !== (int)date('n')): ?>
+                    <a href="?year=<?php echo date('Y'); ?>&month=<?php echo date('n'); ?>" class="mwd-btn-subtle" title="Current Month">Today</a>
+                <?php endif; ?>
             </div>
         </div>
 
-        <div class="wd-stat-card wd-stat-working">
-            <div class="wd-stat-info">
-                <span class="wd-stat-label">Working Days</span>
-                <span class="wd-stat-val"><?php echo $workingDaysCount; ?></span>
-                <span class="wd-stat-sub"><?php echo round(($workingDaysCount / $totalDays) * 100); ?>% of month</span>
-            </div>
-            <div class="wd-stat-icon">
-                <i class="fa-solid fa-briefcase"></i>
-            </div>
-        </div>
-
-        <div class="wd-stat-card wd-stat-offs">
-            <div class="wd-stat-info">
-                <span class="wd-stat-label">Weekly Offs</span>
-                <span class="wd-stat-val"><?php echo $weeklyOffCount; ?></span>
-                <span class="wd-stat-sub">Sundays / Weekends</span>
-            </div>
-            <div class="wd-stat-icon">
-                <i class="fa-solid fa-mug-hot"></i>
-            </div>
-        </div>
-
-        <div class="wd-stat-card wd-stat-holidays">
-            <div class="wd-stat-info">
-                <span class="wd-stat-label">Official Holidays</span>
-                <span class="wd-stat-val"><?php echo $holidaysCount; ?></span>
-                <span class="wd-stat-sub">Paid holidays</span>
-            </div>
-            <div class="wd-stat-icon">
-                <i class="fa-solid fa-umbrella-beach"></i>
-            </div>
+        <div class="mwd-header-actions">
+            <button type="button" class="mwd-btn-ghost" onclick="autoFillSundaysOff()" title="Auto-fill Sundays as Weekly Off and Mon–Sat as Working" <?php echo !$canManage ? 'disabled' : ''; ?>>
+                <i class="fa-solid fa-wand-magic-sparkles"></i>
+                <span>Auto-fill Defaults</span>
+            </button>
+            <button type="submit" form="workingDaysForm" class="mwd-btn-primary" <?php echo !$canManage ? 'disabled' : ''; ?>>
+                <i class="fa-solid fa-floppy-disk"></i>
+                <span>Save Changes</span>
+            </button>
         </div>
     </div>
 
-    <!-- ── Interactive Form Container ── -->
+    <!-- ── Automatic Summary Bar ── -->
+    <div class="mwd-summary-bar">
+        <div class="mwd-summary-item">
+            <span class="mwd-summary-label">Month:</span>
+            <strong class="mwd-summary-val"><?php echo $monthName . ' ' . $selectedYear; ?></strong>
+        </div>
+        <div class="mwd-summary-sep"></div>
+        <div class="mwd-summary-item">
+            <span class="mwd-summary-label">Total Days:</span>
+            <strong class="mwd-summary-val" id="summaryTotal"><?php echo $totalDays; ?></strong>
+        </div>
+        <div class="mwd-summary-sep"></div>
+        <div class="mwd-summary-item">
+            <span class="mwd-dot dot-working"></span>
+            <span class="mwd-summary-label">Working Days:</span>
+            <strong class="mwd-summary-val" id="summaryWorking"><?php echo $workingDaysCount; ?></strong>
+        </div>
+        <div class="mwd-summary-sep"></div>
+        <div class="mwd-summary-item">
+            <span class="mwd-dot dot-off"></span>
+            <span class="mwd-summary-label">Weekly Offs:</span>
+            <strong class="mwd-summary-val" id="summaryOffs"><?php echo $weeklyOffCount; ?></strong>
+        </div>
+        <div class="mwd-summary-sep"></div>
+        <div class="mwd-summary-item">
+            <span class="mwd-dot dot-holiday"></span>
+            <span class="mwd-summary-label">Holidays:</span>
+            <strong class="mwd-summary-val" id="summaryHolidays"><?php echo $holidaysCount; ?></strong>
+        </div>
+    </div>
+
+    <!-- ── Monthly Calendar Form ── -->
     <form method="post" id="workingDaysForm">
         <input type="hidden" name="csrf_token" value="<?php echo $csrfToken; ?>">
         <input type="hidden" name="action" value="save_month">
 
-        <!-- ── Toolbar ── -->
-        <div class="wd-toolbar">
-            <div class="wd-toolbar-left">
-                <button type="button" class="btn-auto" onclick="autoPopulateSchedule('sundays_off')" <?php echo !$canManage ? 'disabled' : ''; ?>>
-                    <i class="fa-solid fa-wand-magic-sparkles"></i>
-                    <span>Sundays Off (6-Day Week)</span>
-                </button>
-                <button type="button" class="btn-auto" onclick="autoPopulateSchedule('sundays_saturdays_off')" <?php echo !$canManage ? 'disabled' : ''; ?>>
-                    <i class="fa-solid fa-wand-magic-sparkles"></i>
-                    <span>Sat &amp; Sun Off (5-Day Week)</span>
-                </button>
+        <div class="mwd-calendar-card">
+            <!-- Weekday Header: Sun to Sat -->
+            <div class="mwd-weekdays">
+                <div class="mwd-weekday is-sunday">Sun</div>
+                <div class="mwd-weekday">Mon</div>
+                <div class="mwd-weekday">Tue</div>
+                <div class="mwd-weekday">Wed</div>
+                <div class="mwd-weekday">Thu</div>
+                <div class="mwd-weekday">Fri</div>
+                <div class="mwd-weekday">Sat</div>
             </div>
 
-            <button type="submit" class="btn-save-cal" <?php echo !$canManage ? 'disabled' : ''; ?>>
-                <i class="fa-solid fa-floppy-disk"></i>
-                <span>Save Calendar Settings</span>
-            </button>
-        </div>
-
-        <!-- ── Calendar Grid Card ── -->
-        <div class="wd-calendar-card" style="margin-top: 18px;">
-            <!-- Weekdays Header (Sun-Sat) -->
-            <div class="wd-weekdays-header">
-                <div class="wd-weekday-label weekend">Sunday</div>
-                <div class="wd-weekday-label">Monday</div>
-                <div class="wd-weekday-label">Tuesday</div>
-                <div class="wd-weekday-label">Wednesday</div>
-                <div class="wd-weekday-label">Thursday</div>
-                <div class="wd-weekday-label">Friday</div>
-                <div class="wd-weekday-label weekend">Saturday</div>
-            </div>
-
-            <!-- Days Grid -->
-            <div class="wd-days-grid">
-                <!-- Empty Cells for Days Before 1st of Month -->
+            <!-- Calendar Days Grid -->
+            <div class="mwd-grid">
+                <!-- Empty Offset Cells Before Month Starts -->
                 <?php for ($empty = 0; $empty < $firstDayOfWeek; $empty++): ?>
-                    <div class="wd-cell-empty"></div>
+                    <div class="mwd-cell-empty"></div>
                 <?php endfor; ?>
 
-                <!-- Day Cells -->
+                <!-- Month Days -->
                 <?php for ($day = 1; $day <= $daysInMonth; $day++): ?>
                     <?php
-                    $dateStr   = sprintf('%04d-%02d-%02d', $selectedYear, $selectedMonth, $day);
-                    $weekdayNum= (int)date('w', strtotime($dateStr));
-                    $weekdayName = date('D', strtotime($dateStr));
-                    $isToday   = ($dateStr === date('Y-m-d'));
+                    $dateStr     = sprintf('%04d-%02d-%02d', $selectedYear, $selectedMonth, $day);
+                    $weekdayNum  = (int)date('w', strtotime($dateStr)); // 0 = Sun
+                    $isToday     = ($dateStr === date('Y-m-d'));
 
                     if (isset($savedDays[$day])) {
                         $currentType  = $savedDays[$day]['day_type'];
                         $currentTitle = $savedDays[$day]['title'] ?? '';
                         $currentNotes = $savedDays[$day]['notes'] ?? '';
                     } else {
+                        // Automatic Day Marking: Sundays are weekly off, Mon-Sat are working days
                         $currentType  = ($weekdayNum === 0) ? 'weekly_off' : 'working_day';
                         $currentTitle = ($weekdayNum === 0) ? 'Sunday Off' : '';
                         $currentNotes = '';
                     }
                     ?>
-                    <div class="wd-day-cell type-<?php echo htmlspecialchars($currentType); ?> <?php echo $isToday ? 'is-today' : ''; ?>" id="cell_<?php echo $day; ?>">
-                        <div class="wd-day-top">
-                            <span class="wd-day-num"><?php echo $day; ?></span>
-                            <span class="wd-day-weekday"><?php echo $weekdayName; ?></span>
+                    <div class="mwd-cell type-<?php echo htmlspecialchars($currentType); ?> <?php echo $isToday ? 'is-today' : ''; ?>" id="cell_<?php echo $day; ?>" data-day="<?php echo $day; ?>" data-weekday="<?php echo $weekdayNum; ?>">
+                        <div class="mwd-cell-header">
+                            <span class="mwd-day-num"><?php echo $day; ?></span>
+                            <?php if ($isToday): ?>
+                                <span class="mwd-today-badge">Today</span>
+                            <?php endif; ?>
                         </div>
 
-                        <div>
+                        <div class="mwd-cell-content">
                             <select 
                                 name="days[<?php echo $day; ?>][type]" 
-                                class="wd-day-type-select" 
-                                onchange="onTypeChange(<?php echo $day; ?>, this.value)"
+                                id="select_<?php echo $day; ?>" 
+                                class="mwd-type-select type-<?php echo htmlspecialchars($currentType); ?>" 
+                                onchange="onDayTypeChange(<?php echo $day; ?>, this.value)"
                                 <?php echo !$canManage ? 'disabled' : ''; ?>>
-                                <option value="working_day" <?php echo $currentType === 'working_day' ? 'selected' : ''; ?>>💼 Working Day</option>
-                                <option value="weekly_off" <?php echo $currentType === 'weekly_off' ? 'selected' : ''; ?>>🏖️ Weekly Off</option>
-                                <option value="holiday" <?php echo $currentType === 'holiday' ? 'selected' : ''; ?>>🎉 Holiday</option>
+                                <option value="working_day" <?php echo $currentType === 'working_day' ? 'selected' : ''; ?>>Working</option>
+                                <option value="weekly_off" <?php echo $currentType === 'weekly_off' ? 'selected' : ''; ?>>Weekly Off</option>
+                                <option value="holiday" <?php echo $currentType === 'holiday' ? 'selected' : ''; ?>>Holiday</option>
                             </select>
 
-                            <input 
-                                type="text" 
-                                name="days[<?php echo $day; ?>][title]" 
-                                class="wd-day-title-input" 
-                                placeholder="Title / Holiday name..." 
-                                value="<?php echo htmlspecialchars($currentTitle); ?>"
-                                maxlength="100"
-                                <?php echo !$canManage ? 'readonly' : ''; ?>>
+                            <div class="mwd-holiday-wrap" id="wrap_title_<?php echo $day; ?>" style="<?php echo $currentType === 'holiday' ? '' : 'display: none;'; ?>">
+                                <input 
+                                    type="text" 
+                                    name="days[<?php echo $day; ?>][title]" 
+                                    id="title_<?php echo $day; ?>" 
+                                    class="mwd-holiday-input" 
+                                    placeholder="Holiday name" 
+                                    value="<?php echo htmlspecialchars($currentTitle); ?>"
+                                    maxlength="100"
+                                    <?php echo !$canManage ? 'readonly' : ''; ?>>
+                            </div>
+
+                            <input type="hidden" name="days[<?php echo $day; ?>][notes]" value="<?php echo htmlspecialchars($currentNotes); ?>">
                         </div>
                     </div>
                 <?php endfor; ?>
@@ -823,55 +784,97 @@ include __DIR__ . '/header.php';
 </div>
 
 <script>
-function onTypeChange(dayNum, newType) {
-    const cell = document.getElementById('cell_' + dayNum);
-    if (!cell) return;
-    cell.classList.remove('type-working_day', 'type-weekly_off', 'type-holiday');
-    cell.classList.add('type-' + newType);
-
-    const titleInput = cell.querySelector('.wd-day-title-input');
-    if (titleInput && !titleInput.value.trim()) {
-        if (newType === 'weekly_off') {
-            titleInput.value = 'Weekly Off';
-        } else if (newType === 'holiday') {
-            titleInput.value = 'Public Holiday';
-        }
-    }
+// Month & Year Navigation Jump
+function jumpToMonth() {
+    const month = document.getElementById('navMonth').value;
+    const year  = document.getElementById('navYear').value;
+    window.location.href = `working_days?year=${year}&month=${month}`;
 }
 
-function autoPopulateSchedule(mode) {
-    if (!confirm('This will update the days in the form for ' + (mode === 'sundays_off' ? 'Sundays Off (6-day week)' : 'Saturday & Sunday Off (5-day week)') + '. Click "Save Calendar Settings" afterwards to commit changes.')) {
-        return;
+// Live Summary Recalculation
+function recalculateSummary() {
+    let working = 0;
+    let offs = 0;
+    let holidays = 0;
+
+    const selects = document.querySelectorAll('.mwd-type-select');
+    selects.forEach(sel => {
+        if (sel.value === 'working_day') working++;
+        else if (sel.value === 'weekly_off') offs++;
+        else if (sel.value === 'holiday') holidays++;
+    });
+
+    const elTotal = document.getElementById('summaryTotal');
+    const elWorking = document.getElementById('summaryWorking');
+    const elOffs = document.getElementById('summaryOffs');
+    const elHolidays = document.getElementById('summaryHolidays');
+
+    if (elTotal) elTotal.textContent = selects.length;
+    if (elWorking) elWorking.textContent = working;
+    if (elOffs) elOffs.textContent = offs;
+    if (elHolidays) elHolidays.textContent = holidays;
+}
+
+// Handle Day Type Change
+function onDayTypeChange(dayNum, newType) {
+    const cell = document.getElementById('cell_' + dayNum);
+    const select = document.getElementById('select_' + dayNum);
+    const wrap = document.getElementById('wrap_title_' + dayNum);
+    const titleInput = document.getElementById('title_' + dayNum);
+
+    if (cell) {
+        cell.classList.remove('type-working_day', 'type-weekly_off', 'type-holiday');
+        cell.classList.add('type-' + newType);
     }
 
-    const daysInMonth = <?php echo $daysInMonth; ?>;
-    const year = <?php echo $selectedYear; ?>;
-    const month = <?php echo $selectedMonth; ?>;
+    if (select) {
+        select.classList.remove('type-working_day', 'type-weekly_off', 'type-holiday');
+        select.classList.add('type-' + newType);
+    }
 
-    for (let day = 1; day <= daysInMonth; day++) {
-        const d = new Date(year, month - 1, day);
-        const dayOfWeek = d.getDay(); // 0 = Sun, 6 = Sat
-        const cell = document.getElementById('cell_' + day);
-        if (!cell) continue;
-
-        const select = cell.querySelector('.wd-day-type-select');
-        const titleInput = cell.querySelector('.wd-day-title-input');
-        if (!select) continue;
-
-        if (dayOfWeek === 0) {
-            select.value = 'weekly_off';
-            if (titleInput) titleInput.value = 'Sunday Off';
-            onTypeChange(day, 'weekly_off');
-        } else if (dayOfWeek === 6 && mode === 'sundays_saturdays_off') {
-            select.value = 'weekly_off';
-            if (titleInput) titleInput.value = 'Saturday Off';
-            onTypeChange(day, 'weekly_off');
-        } else {
-            select.value = 'working_day';
-            if (titleInput) titleInput.value = '';
-            onTypeChange(day, 'working_day');
+    if (newType === 'holiday') {
+        if (wrap) wrap.style.display = 'block';
+        if (titleInput && !titleInput.value.trim()) {
+            titleInput.placeholder = 'Holiday name...';
+            titleInput.focus();
+        }
+    } else {
+        if (wrap) wrap.style.display = 'none';
+        if (newType === 'weekly_off' && titleInput && !titleInput.value.trim()) {
+            titleInput.value = (cell && cell.dataset.weekday === '0') ? 'Sunday Off' : 'Weekly Off';
+        } else if (newType === 'working_day' && titleInput) {
+            titleInput.value = '';
         }
     }
+
+    recalculateSummary();
+}
+
+// Automatic Day Marking: Reset to standard defaults (Sundays Off, Mon-Sat Working)
+function autoFillSundaysOff() {
+    const daysInMonth = <?php echo $daysInMonth; ?>;
+
+    for (let day = 1; day <= daysInMonth; day++) {
+        const cell = document.getElementById('cell_' + day);
+        const select = document.getElementById('select_' + day);
+        const titleInput = document.getElementById('title_' + day);
+        if (!cell || !select) continue;
+
+        const weekday = parseInt(cell.dataset.weekday, 10);
+        if (weekday === 0) {
+            // Sunday = Weekly Off
+            select.value = 'weekly_off';
+            if (titleInput) titleInput.value = 'Sunday Off';
+            onDayTypeChange(day, 'weekly_off');
+        } else {
+            // Monday–Saturday = Working Day
+            select.value = 'working_day';
+            if (titleInput) titleInput.value = '';
+            onDayTypeChange(day, 'working_day');
+        }
+    }
+
+    recalculateSummary();
 }
 </script>
 

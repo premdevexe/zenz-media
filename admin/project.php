@@ -13,7 +13,7 @@ if (!Security::isAuthenticated()) {
 $adminId = (int)($_SESSION['admin_id'] ?? 1);
 $canView = Security::hasPermission('projects.view', $adminId) || Security::hasPermission('projects.manage', $adminId);
 if (!$canView) {
-    Security::requirePermission('projects.view', $adminId);
+    Security::requirePermission('projects.view', $adminId, '../admin/dashboard');
 }
 $canManage = Security::hasPermission('projects.manage', $adminId);
 

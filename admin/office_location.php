@@ -21,8 +21,8 @@ Security::requirePermission('settings.view', $adminId, '../admin/dashboard');
 
 $canManageSettings = Security::hasPermission('settings.manage', $adminId);
 
-$pageTitle = 'Office Location & GPS Settings';
-$currentPage = 'office_location';
+$pageTitle = 'GPS Location & Geofencing';
+$currentPage = 'gps_location';
 
 $flashMessage = $_SESSION['office_flash'] ?? '';
 $flashType = $_SESSION['office_flash_type'] ?? '';
@@ -155,7 +155,7 @@ include 'header.php';
 <style>
 .office-grid {
     display: grid;
-    grid-template-columns: 420px 1fr;
+    grid-template-columns: 360px 1fr;
     gap: 24px;
     align-items: start;
     margin-top: 20px;
@@ -189,6 +189,11 @@ include 'header.php';
     height: 520px;
     width: 100%;
     z-index: 1;
+}
+@media (max-width: 768px) {
+    #officeMap {
+        height: 380px;
+    }
 }
 
 .form-panel {
@@ -276,10 +281,10 @@ include 'header.php';
                 <span>&rsaquo;</span>
                 <a href="settings" style="color: inherit; text-decoration: none;">Settings</a>
                 <span>&rsaquo;</span>
-                <span style="color: var(--adm-brand); font-weight: 700;">Office GPS &amp; Geofencing</span>
+                <span style="color: var(--adm-brand); font-weight: 700;">GPS Location</span>
             </div>
             <h1 style="font-family: 'Outfit', sans-serif; font-size: 1.8rem; font-weight: 800; color: var(--adm-text-main); letter-spacing: -0.02em;">
-                Office Location &amp; Attendance Geofencing
+                GPS Location &amp; Attendance Geofencing
             </h1>
         </div>
 
@@ -292,13 +297,9 @@ include 'header.php';
                 <i class="fa-solid fa-sliders"></i>
                 <span>Branding &amp; SMTP</span>
             </a>
-            <a href="office_location" class="btn-saas" style="padding: 8px 16px; border-radius: var(--adm-radius-pill); background: var(--adm-brand); border: 1px solid var(--adm-brand); color: #ffffff; font-size: 0.85rem; font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
+            <a href="gps_location" class="btn-saas" style="padding: 8px 16px; border-radius: var(--adm-radius-pill); background: var(--adm-brand); border: 1px solid var(--adm-brand); color: #ffffff; font-size: 0.85rem; font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
                 <i class="fa-solid fa-location-dot"></i>
-                <span>Office GPS</span>
-            </a>
-            <a href="attendance" class="btn-saas" style="padding: 8px 16px; border-radius: var(--adm-radius-pill); background: var(--adm-brand-light); border: 1px solid var(--adm-brand-border); color: var(--adm-brand); font-size: 0.85rem; font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
-                <i class="fa-solid fa-calendar-check"></i>
-                <span>Attendance</span>
+                <span>GPS Location</span>
             </a>
         </div>
     </div>
@@ -311,26 +312,6 @@ include 'header.php';
         </div>
     <?php endif; ?>
 
-    <!-- Summary Stats Pill Bar -->
-    <div class="stat-pills">
-        <div class="stat-pill">
-            <i class="fa-solid fa-building" style="color: var(--adm-brand);"></i>
-            <span>Active Office: <strong><?php echo htmlspecialchars($officeSettings['office_name']); ?></strong></span>
-        </div>
-        <div class="stat-pill">
-            <i class="fa-solid fa-circle-dot" style="color: #059669;"></i>
-            <span>Allowed Radius: <strong><?php echo (int)$officeSettings['office_radius_meters']; ?> meters</strong></span>
-        </div>
-        <div class="stat-pill">
-            <i class="fa-solid fa-users" style="color: var(--adm-brand);"></i>
-            <span>Policy: <strong><?php echo $onSiteCount; ?> On-Site</strong> (Restricted) &bull; <strong><?php echo $wfhCount; ?> WFH</strong> (Exempt)</span>
-        </div>
-        <div class="stat-pill">
-            <i class="fa-solid <?php echo !empty($officeSettings['location_attendance_enabled']) ? 'fa-shield-halved' : 'fa-shield'; ?>" style="color: <?php echo !empty($officeSettings['location_attendance_enabled']) ? '#059669' : '#d97706'; ?>;"></i>
-            <span>Status: <strong><?php echo !empty($officeSettings['location_attendance_enabled']) ? 'Geofencing Active' : 'Geofencing Disabled'; ?></strong></span>
-        </div>
-    </div>
-
     <!-- Main Two-Column Layout (Form + Map) -->
     <div class="office-grid">
 
@@ -338,15 +319,16 @@ include 'header.php';
         <div class="form-panel">
             <h2 style="font-size: 1.15rem; font-weight: 800; color: var(--adm-text-main); margin-bottom: 6px; display: flex; align-items: center; gap: 8px;">
                 <i class="fa-solid fa-sliders" style="color: var(--adm-brand);"></i>
-                <span>Geofence Parameters</span>
+                <span>Parameters</span>
             </h2>
             <p style="font-size: 0.82rem; color: var(--adm-muted); margin-bottom: 20px; line-height: 1.5;">
-                Enter coordinates manually, drag the map marker, or use browser GPS detection.
+                Configure the primary office location parameter.
             </p>
 
             <form method="POST" action="" id="officeSettingsForm">
                 <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrfToken); ?>">
 
+                <!-- Visible Parameter: Name Field Only -->
                 <div class="form-group-saas">
                     <label for="office_name">Office Location Name <span style="color:var(--adm-danger);">*</span></label>
                     <input type="text" id="office_name" name="office_name" class="form-control-saas" 
@@ -355,103 +337,23 @@ include 'header.php';
                         placeholder="e.g. Cloud Aspire Headquarters - Main Campus">
                 </div>
 
-                <div class="form-group-saas">
-                    <label for="office_address">Physical Address (Optional)</label>
-                    <input type="text" id="office_address" name="office_address" class="form-control-saas" 
-                        value="<?php echo htmlspecialchars($officeSettings['office_address']); ?>" 
-                        maxlength="255" <?php echo !$canManageSettings ? 'readonly' : ''; ?>
-                        placeholder="e.g. 123 Tech Park, Puducherry, India">
-                </div>
-
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;" class="form-group-saas">
-                    <div>
-                        <label for="office_latitude">Latitude <span style="color:var(--adm-danger);">*</span></label>
-                        <input type="number" step="any" min="-90" max="90" id="office_latitude" name="office_latitude" class="form-control-saas" 
-                            value="<?php echo htmlspecialchars((string)$officeSettings['office_latitude']); ?>" 
-                            required <?php echo !$canManageSettings ? 'readonly' : ''; ?>
-                            onchange="updateMapFromInputs()">
-                    </div>
-                    <div>
-                        <label for="office_longitude">Longitude <span style="color:var(--adm-danger);">*</span></label>
-                        <input type="number" step="any" min="-180" max="180" id="office_longitude" name="office_longitude" class="form-control-saas" 
-                            value="<?php echo htmlspecialchars((string)$officeSettings['office_longitude']); ?>" 
-                            required <?php echo !$canManageSettings ? 'readonly' : ''; ?>
-                            onchange="updateMapFromInputs()">
-                    </div>
-                </div>
-
-                <div class="form-group-saas">
-                    <label for="office_radius_meters">Allowed Attendance Radius (Meters) <span style="color:var(--adm-danger);">*</span></label>
-                    <input type="number" min="10" max="50000" id="office_radius_meters" name="office_radius_meters" class="form-control-saas" 
-                        value="<?php echo htmlspecialchars((string)$officeSettings['office_radius_meters']); ?>" 
-                        required <?php echo !$canManageSettings ? 'readonly' : ''; ?>
-                        oninput="updateRadiusFromInput()">
-                    <small style="font-size: 0.75rem; color: var(--adm-muted); margin-top: 4px; display: block;">
-                        Recommended: 50m to 150m for a standard building; 200m+ for large multi-acre campuses.
-                    </small>
-                </div>
-
-                <div class="form-group-saas" style="margin-top: 10px;">
-                    <label style="display: flex; align-items: center; gap: 10px; cursor: <?php echo $canManageSettings ? 'pointer' : 'not-allowed'; ?>; padding: 12px 14px; background: var(--adm-surface-subtle); border: 1.5px solid var(--adm-border); border-radius: var(--adm-radius-md); font-size: 0.88rem; font-weight: 700; color: var(--adm-text-main);">
-                        <input type="checkbox" name="location_attendance_enabled" value="1" <?php echo !empty($officeSettings['location_attendance_enabled']) ? 'checked' : ''; ?> <?php echo !$canManageSettings ? 'disabled' : ''; ?> style="width: 18px; height: 18px; accent-color: var(--adm-brand);">
-                        <span>Enforce Geofence Restriction for On-Site Staff</span>
-                    </label>
-                    <small style="font-size: 0.75rem; color: var(--adm-muted); margin-top: 4px; display: block;">
-                        When unchecked, employees can punch in/out from anywhere without GPS distance checks.
-                    </small>
-                </div>
-
-                <!-- WFH & Scheduled Check-In Policies Section -->
-                <div style="margin-top: 22px; padding: 16px; background: rgba(79, 70, 229, 0.03); border: 1.5px solid rgba(79, 70, 229, 0.15); border-radius: var(--adm-radius-md);">
-                    <h3 style="font-size: 0.95rem; font-weight: 800; color: var(--adm-text-main); margin-bottom: 4px; display: flex; align-items: center; gap: 8px;">
-                        <i class="fa-solid fa-business-time" style="color: var(--adm-brand);"></i>
-                        <span>WFH &amp; Scheduled Check-In Policy</span>
-                    </h3>
-                    <p style="font-size: 0.76rem; color: var(--adm-muted); margin-bottom: 14px; line-height: 1.4;">
-                        Enforce server-side rules when employees punch in with an approved WFH or on-site exception time.
-                    </p>
-
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;" class="form-group-saas">
-                        <div>
-                            <label for="wfh_early_window_minutes" style="font-size: 0.78rem;">Early Window (Mins)</label>
-                            <input type="number" min="0" max="120" id="wfh_early_window_minutes" name="wfh_early_window_minutes" class="form-control-saas" 
-                                value="<?php echo htmlspecialchars((string)($officeSettings['wfh_early_window_minutes'] ?? 15)); ?>" 
-                                <?php echo !$canManageSettings ? 'readonly' : ''; ?>
-                                title="Minutes before approved time employee is allowed to punch in">
-                            <small style="font-size: 0.7rem; color: var(--adm-muted);">Rejects punch if too early</small>
-                        </div>
-                        <div>
-                            <label for="wfh_grace_period_minutes" style="font-size: 0.78rem;">Grace Period (Mins)</label>
-                            <input type="number" min="0" max="120" id="wfh_grace_period_minutes" name="wfh_grace_period_minutes" class="form-control-saas" 
-                                value="<?php echo htmlspecialchars((string)($officeSettings['wfh_grace_period_minutes'] ?? 15)); ?>" 
-                                <?php echo !$canManageSettings ? 'readonly' : ''; ?>
-                                title="Minutes after approved time marked on-time before marked delayed">
-                            <small style="font-size: 0.7rem; color: var(--adm-muted);">Window marked on-time</small>
-                        </div>
-                    </div>
-
-                    <div class="form-group-saas" style="margin-top: 10px;">
-                        <label for="wfh_late_threshold_minutes" style="font-size: 0.78rem;">Late Check-In Window (Mins)</label>
-                        <input type="number" min="0" max="360" id="wfh_late_threshold_minutes" name="wfh_late_threshold_minutes" class="form-control-saas" 
-                            value="<?php echo htmlspecialchars((string)($officeSettings['wfh_late_threshold_minutes'] ?? 30)); ?>" 
-                            <?php echo !$canManageSettings ? 'readonly' : ''; ?>>
-                        <small style="font-size: 0.7rem; color: var(--adm-muted); display: block; margin-top: 3px;">
-                            Permits check-in with a delayed flag up to this threshold.
-                        </small>
-                    </div>
-
-                    <div style="margin-top: 10px;">
-                        <label style="display: flex; align-items: flex-start; gap: 8px; cursor: <?php echo $canManageSettings ? 'pointer' : 'not-allowed'; ?>; font-size: 0.8rem; font-weight: 600; color: var(--adm-text-body);">
-                            <input type="checkbox" name="wfh_auto_reschedule_allowed" value="1" <?php echo !empty($officeSettings['wfh_auto_reschedule_allowed']) ? 'checked' : ''; ?> <?php echo !$canManageSettings ? 'disabled' : ''; ?> style="width: 16px; height: 16px; margin-top: 2px; accent-color: var(--adm-brand);">
-                            <span>Allow Late Check-In Authorization Without Requiring Fresh Approval</span>
-                        </label>
-                    </div>
-                </div>
+                <!-- Hidden Parameter Fields (Preserves backend validation, calculations & geofencing rules) -->
+                <input type="hidden" id="office_address" name="office_address" value="<?php echo htmlspecialchars($officeSettings['office_address'] ?? ''); ?>">
+                <input type="hidden" id="office_latitude" name="office_latitude" value="<?php echo htmlspecialchars((string)$officeSettings['office_latitude']); ?>">
+                <input type="hidden" id="office_longitude" name="office_longitude" value="<?php echo htmlspecialchars((string)$officeSettings['office_longitude']); ?>">
+                <input type="hidden" id="office_radius_meters" name="office_radius_meters" value="<?php echo htmlspecialchars((string)$officeSettings['office_radius_meters']); ?>">
+                <input type="hidden" name="location_attendance_enabled" value="<?php echo !empty($officeSettings['location_attendance_enabled']) ? '1' : '0'; ?>">
+                <input type="hidden" id="wfh_early_window_minutes" name="wfh_early_window_minutes" value="<?php echo htmlspecialchars((string)($officeSettings['wfh_early_window_minutes'] ?? 15)); ?>">
+                <input type="hidden" id="wfh_grace_period_minutes" name="wfh_grace_period_minutes" value="<?php echo htmlspecialchars((string)($officeSettings['wfh_grace_period_minutes'] ?? 15)); ?>">
+                <input type="hidden" id="wfh_late_threshold_minutes" name="wfh_late_threshold_minutes" value="<?php echo htmlspecialchars((string)($officeSettings['wfh_late_threshold_minutes'] ?? 30)); ?>">
+                <?php if (!empty($officeSettings['wfh_auto_reschedule_allowed'])): ?>
+                    <input type="hidden" name="wfh_auto_reschedule_allowed" value="1">
+                <?php endif; ?>
 
                 <?php if ($canManageSettings): ?>
                     <button type="submit" name="save_office_settings" class="btn-saas" style="width: 100%; height: 46px; margin-top: 16px; border: none; border-radius: var(--adm-radius-md); background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%); color: #ffffff; font-weight: 800; font-size: 0.95rem; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35);">
                         <i class="fa-solid fa-floppy-disk"></i>
-                        <span>Save Office Geofencing Settings</span>
+                        <span>Save Parameters</span>
                     </button>
                 <?php else: ?>
                     <div style="margin-top: 16px; padding: 10px 14px; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.25); color: #dc2626; border-radius: var(--adm-radius-md); font-size: 0.82rem; font-weight: 600;">
@@ -493,7 +395,7 @@ include 'header.php';
 
                 <div style="display: flex; gap: 8px;">
                     <?php if ($canManageSettings): ?>
-                        <button type="button" class="btn-saas" onclick="detectAdminGPS()" style="height: 32px; padding: 0 12px; border-radius: var(--adm-radius-pill); background: var(--adm-brand-light); border: 1px solid var(--adm-brand-border); color: var(--adm-brand); font-size: 0.78rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;">
+                        <button type="button" id="btnDetectAdminGPS" class="btn-saas" onclick="detectAdminGPS(this)" style="height: 32px; padding: 0 12px; border-radius: var(--adm-radius-pill); background: var(--adm-brand-light); border: 1px solid var(--adm-brand-border); color: var(--adm-brand); font-size: 0.78rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;">
                             <i class="fa-solid fa-crosshairs"></i>
                             <span>Detect My GPS</span>
                         </button>
@@ -603,38 +505,112 @@ include 'header.php';
         }
     }
 
-    // Detect Admin Device GPS
-    function detectAdminGPS() {
+    // Detect Admin Device GPS with permission handling, error handling, and accuracy fallback
+    async function detectAdminGPS(triggerBtn) {
+        const btn = triggerBtn || document.getElementById('btnDetectAdminGPS') || (typeof event !== 'undefined' ? event?.currentTarget : null);
+        const origText = btn ? btn.innerHTML : '';
+
         if (!navigator.geolocation) {
             alert("Geolocation is not supported by your browser.");
             return;
         }
 
-        const btn = event.currentTarget;
-        const origText = btn.innerHTML;
-        btn.disabled = true;
-        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Detecting...';
+        // Check if insecure HTTP context is blocking geolocation
+        if (!window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+            alert("Geolocation requires a secure context (HTTPS or localhost). Please access the site via HTTPS.");
+            return;
+        }
+
+        // Check browser permissions query if supported
+        if (navigator.permissions && navigator.permissions.query) {
+            try {
+                const permStatus = await navigator.permissions.query({ name: 'geolocation' });
+                if (permStatus.state === 'denied') {
+                    alert("Location access has been blocked. Please enable location permissions for this site in your browser settings (click the padlock icon in the address bar) and try again.");
+                    return;
+                }
+            } catch (e) {
+                // Ignore permissions API failure if query not supported for geolocation
+            }
+        }
+
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Detecting...';
+        }
+
+        function handleSuccess(pos) {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = origText;
+            }
+            const lat = pos.coords.latitude;
+            const lng = pos.coords.longitude;
+            const accuracy = Math.round(pos.coords.accuracy || 0);
+
+            const latInput = document.getElementById('office_latitude');
+            const lngInput = document.getElementById('office_longitude');
+            if (latInput) latInput.value = lat.toFixed(8);
+            if (lngInput) lngInput.value = lng.toFixed(8);
+
+            const newPos = [lat, lng];
+            officeMarker.setLatLng(newPos);
+            geofenceCircle.setLatLng(newPos);
+            map.setView(newPos, 17);
+            updateCoordinatesDisplay(lat, lng);
+
+            officeMarker.bindPopup(`<strong><?php echo htmlspecialchars($officeSettings['office_name']); ?></strong><br>GPS Detected (±${accuracy}m accuracy)`).openPopup();
+        }
+
+        function handleError(err) {
+            // If high accuracy timed out or unavailable, try low accuracy fallback
+            if (err.code === 3 || err.code === 2) {
+                if (btn) {
+                    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Retrying (Network)...';
+                }
+                navigator.geolocation.getCurrentPosition(
+                    handleSuccess,
+                    function(fallbackErr) {
+                        if (btn) {
+                            btn.disabled = false;
+                            btn.innerHTML = origText;
+                        }
+                        displayGpsError(fallbackErr);
+                    },
+                    { enableHighAccuracy: false, timeout: 15000, maximumAge: 60000 }
+                );
+                return;
+            }
+
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = origText;
+            }
+            displayGpsError(err);
+        }
+
+        function displayGpsError(err) {
+            let msg = "GPS detection error: ";
+            switch (err.code) {
+                case 1: // PERMISSION_DENIED
+                    msg = "Location permission denied. Please allow location access in your browser settings and try again.";
+                    break;
+                case 2: // POSITION_UNAVAILABLE
+                    msg = "Location information is unavailable. Ensure device GPS / location services are active.";
+                    break;
+                case 3: // TIMEOUT
+                    msg = "Location request timed out. Please check your network or GPS connection.";
+                    break;
+                default:
+                    msg += err.message || "Unknown error occurred.";
+            }
+            alert(msg);
+        }
 
         navigator.geolocation.getCurrentPosition(
-            function(pos) {
-                btn.disabled = false;
-                btn.innerHTML = origText;
-                const lat = pos.coords.latitude;
-                const lng = pos.coords.longitude;
-                document.getElementById('office_latitude').value = lat.toFixed(8);
-                document.getElementById('office_longitude').value = lng.toFixed(8);
-                const newPos = [lat, lng];
-                officeMarker.setLatLng(newPos);
-                geofenceCircle.setLatLng(newPos);
-                map.setView(newPos, 17);
-                updateCoordinatesDisplay(lat, lng);
-            },
-            function(err) {
-                btn.disabled = false;
-                btn.innerHTML = origText;
-                alert("GPS detection failed: " + err.message + ". Please ensure browser location permissions are granted.");
-            },
-            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+            handleSuccess,
+            handleError,
+            { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
         );
     }
 

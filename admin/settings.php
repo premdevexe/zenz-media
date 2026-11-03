@@ -36,10 +36,41 @@ if (!$adminId && isset($_SESSION['admin_username'])) {
     }
 }
 
+// Enforce role-based access permission on the server side
+Security::requirePermission('settings.view', $adminId, '../admin/dashboard');
+
 // ----------------------------------------------------------------------------
 // Process POST Actions (Profile Update & Password Change) with PRG
 // ----------------------------------------------------------------------------
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    Security::requirePermission('settings.manage', $adminId);
+
+    // 0. Handle quick toggle for Employee Panel Index Page
+    if (isset($_POST['action']) && $_POST['action'] === 'toggle_employee_index') {
+        $token = $_POST['csrf_token'] ?? '';
+        if (Security::validateCSRFToken($token, 'settings_toggle_index')) {
+            $newState = !empty($_POST['employee_index_enabled']) ? 1 : 0;
+            try {
+                $stmt = $pdo->prepare("UPDATE site_settings SET employee_index_enabled = ? WHERE is_active = 1");
+                $stmt->execute([$newState]);
+                if ($stmt->rowCount() === 0) {
+                    $pdo->prepare("UPDATE site_settings SET employee_index_enabled = ?")->execute([$newState]);
+                }
+                Security::logAudit($adminId, 'toggle_employee_index', 'site_settings', 0, ['employee_index_enabled' => $newState]);
+                $statusText = $newState ? 'turned ON' : 'turned OFF';
+                $_SESSION['settings_flash'] = "Employee Panel index page successfully {$statusText}.";
+                $_SESSION['settings_flash_type'] = 'success';
+            } catch (PDOException $e) {
+                $_SESSION['settings_flash'] = "Database error while updating Employee Panel status.";
+                $_SESSION['settings_flash_type'] = 'error';
+            }
+        } else {
+            $_SESSION['settings_flash'] = "Invalid security token. Please refresh and try again.";
+            $_SESSION['settings_flash_type'] = 'error';
+        }
+        header("Location: settings");
+        exit();
+    }
 
     // 1. Handle Profile Update Action
     if (isset($_POST['update_profile'])) {
@@ -223,85 +254,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         header('Location: settings');
         exit();
     }
-
-    // 6. Handle Office Geolocation & Attendance Boundaries Update
-    elseif (isset($_POST['update_office_location'])) {
-        if (!isset($_POST['csrf_token']) || !Security::validateCSRFToken($_POST['csrf_token'], 'update_office_location')) {
-            $_SESSION['settings_flash'] = 'Invalid or expired security token. Please refresh and try again.';
-            $_SESSION['settings_flash_type'] = 'error';
-        } elseif (!Security::hasPermission('manage_settings', $adminId)) {
-            $_SESSION['settings_flash'] = 'Access Denied: You do not possess authorization to update office location settings.';
-            $_SESSION['settings_flash_type'] = 'error';
-        } else {
-            $officeName = trim($_POST['office_name'] ?? '');
-            $officeAddress = trim($_POST['office_address'] ?? '');
-            $officeLat = trim($_POST['office_latitude'] ?? '');
-            $officeLng = trim($_POST['office_longitude'] ?? '');
-            $officeRadius = trim($_POST['office_radius_meters'] ?? '');
-            $locationEnabled = isset($_POST['location_attendance_enabled']) ? 1 : 0;
-
-            if (empty($officeName)) {
-                $_SESSION['settings_flash'] = 'Office Name is required.';
-                $_SESSION['settings_flash_type'] = 'error';
-            } elseif ($officeLat === '' || !is_numeric($officeLat) || $officeLng === '' || !is_numeric($officeLng)) {
-                $_SESSION['settings_flash'] = 'Valid numeric Latitude and Longitude coordinates are required.';
-                $_SESSION['settings_flash_type'] = 'error';
-            } elseif (!Security::validateCoordinates((float)$officeLat, (float)$officeLng)) {
-                $_SESSION['settings_flash'] = 'Coordinates out of bounds: Latitude must be between -90 and 90, Longitude between -180 and 180.';
-                $_SESSION['settings_flash_type'] = 'error';
-            } elseif (!is_numeric($officeRadius) || (int)$officeRadius <= 0 || (int)$officeRadius > 50000) {
-                $_SESSION['settings_flash'] = 'Allowed attendance radius must be a positive integer between 10 and 50,000 meters.';
-                $_SESSION['settings_flash_type'] = 'error';
-            } else {
-                try {
-                    $stmtCheck = $pdo->query("SELECT id FROM site_settings WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1");
-                    $existingSettingId = $stmtCheck->fetchColumn();
-
-                    if ($existingSettingId) {
-                        $upStmt = $pdo->prepare("UPDATE site_settings SET 
-                            office_name = ?, 
-                            office_address = ?, 
-                            office_latitude = ?, 
-                            office_longitude = ?, 
-                            office_radius_meters = ?, 
-                            location_attendance_enabled = ?,
-                            updated_at = NOW()
-                            WHERE id = ?");
-                        $upStmt->execute([
-                            $officeName,
-                            $officeAddress ?: null,
-                            (float)$officeLat,
-                            (float)$officeLng,
-                            (int)$officeRadius,
-                            $locationEnabled,
-                            $existingSettingId
-                        ]);
-                    } else {
-                        $inStmt = $pdo->prepare("INSERT INTO site_settings 
-                            (office_name, office_address, office_latitude, office_longitude, office_radius_meters, location_attendance_enabled, is_active) 
-                            VALUES (?, ?, ?, ?, ?, ?, 1)");
-                        $inStmt->execute([
-                            $officeName,
-                            $officeAddress ?: null,
-                            (float)$officeLat,
-                            (float)$officeLng,
-                            (int)$officeRadius,
-                            $locationEnabled
-                        ]);
-                    }
-
-                    $_SESSION['settings_flash'] = 'Office location and geofencing parameters saved successfully.';
-                    $_SESSION['settings_flash_type'] = 'success';
-                } catch (PDOException $e) {
-                    error_log("Office location settings update error: " . $e->getMessage());
-                    $_SESSION['settings_flash'] = 'Database error while saving office location settings.';
-                    $_SESSION['settings_flash_type'] = 'error';
-                }
-            }
-        }
-        header('Location: settings');
-        exit();
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -338,9 +290,6 @@ try {
     ];
 }
 
-// Fetch active Office Location Settings
-$officeLocationSettings = AttendanceHelper::getOfficeLocationSettings($pdo);
-
 // Environment Telemetry Details
 $phpVersion = PHP_VERSION;
 $dbVersion = 'Unknown';
@@ -359,7 +308,17 @@ $csrfTokenPassword = Security::generateCSRFToken('change_password');
 $csrfTokenTerminate = Security::generateCSRFToken('terminate_session');
 $csrfTokenTerminateAll = Security::generateCSRFToken('terminate_all_others');
 $csrfTokenSimulate = Security::generateCSRFToken('simulate_session');
-$csrfTokenOfficeLocation = Security::generateCSRFToken('update_office_location');
+$csrfTokenSettingsToggle = Security::generateCSRFToken('settings_toggle_index');
+
+$empIndexStatus = 1;
+try {
+    $stEmp = $pdo->query("SELECT employee_index_enabled FROM site_settings WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1");
+    if ($rEmp = $stEmp->fetch(PDO::FETCH_ASSOC)) {
+        if (isset($rEmp['employee_index_enabled'])) {
+            $empIndexStatus = (int)$rEmp['employee_index_enabled'];
+        }
+    }
+} catch (PDOException $e) {}
 
 include 'header.php';
 ?>
@@ -429,8 +388,30 @@ include 'header.php';
 }
 .settings-nav-tabs {
     display: flex;
+    align-items: center;
     gap: 10px;
     flex-wrap: wrap;
+}
+.settings-nav-dropdown-wrap {
+    display: inline-flex;
+    align-items: center;
+}
+.settings-nav-select {
+    padding: 9px 14px;
+    font-size: 0.86rem;
+    font-weight: 700;
+    border-radius: var(--adm-radius-md);
+    border: 1.5px solid var(--adm-brand);
+    background: var(--adm-surface);
+    color: var(--adm-text-main);
+    cursor: pointer;
+    font-family: inherit;
+    outline: none;
+    transition: all var(--adm-transition);
+}
+.settings-nav-select:focus {
+    border-color: var(--adm-brand);
+    box-shadow: 0 0 0 3px var(--adm-brand-light);
 }
 
 /* Button SaaS Styling */
@@ -478,71 +459,6 @@ include 'header.php';
 .btn-saas-danger:hover {
     background: #dc2626;
     color: #ffffff;
-}
-
-/* 4 Enterprise KPI Metric Cards */
-.settings-kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 18px;
-}
-.kpi-card {
-    background: var(--adm-surface);
-    border: 1px solid var(--adm-border);
-    border-radius: var(--adm-radius-xl);
-    padding: 20px;
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    box-shadow: var(--adm-shadow-card);
-    transition: all var(--adm-transition);
-}
-.kpi-card:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--adm-shadow-hover);
-    border-color: var(--adm-border-hover);
-}
-.kpi-icon-wrap {
-    width: 48px;
-    height: 48px;
-    border-radius: var(--adm-radius-lg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.25rem;
-    flex-shrink: 0;
-}
-.kpi-icon-indigo { background: rgba(79, 70, 229, 0.12); color: #4f46e5; }
-.kpi-icon-emerald { background: rgba(16, 185, 129, 0.12); color: #10b981; }
-.kpi-icon-purple { background: rgba(139, 92, 246, 0.12); color: #8b5cf6; }
-.kpi-icon-amber  { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
-.kpi-info { min-width: 0; flex: 1; }
-.kpi-label {
-    font-size: 0.72rem;
-    font-weight: 800;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--adm-muted);
-    margin-bottom: 4px;
-}
-.kpi-value {
-    font-family: 'Outfit', sans-serif;
-    font-size: 1.28rem;
-    font-weight: 800;
-    color: var(--adm-text-main);
-    line-height: 1.2;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.kpi-sub {
-    font-size: 0.76rem;
-    font-weight: 600;
-    color: var(--adm-muted);
-    margin-top: 4px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
 }
 
 /* 2-Column Responsive Workspace Grid */
@@ -895,10 +811,8 @@ include 'header.php';
 
 @media (max-width: 1050px) {
     .settings-workspace-layout { grid-template-columns: 1fr; }
-    .settings-kpi-grid { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 640px) {
-    .settings-kpi-grid { grid-template-columns: 1fr; }
     .settings-hero-header { flex-direction: column; align-items: stretch; padding: 16px 18px; }
     .settings-nav-tabs { width: 100%; }
     .settings-nav-tabs .btn-saas { flex: 1; }
@@ -908,8 +822,6 @@ include 'header.php';
 }
 @media (max-width: 480px) {
     .settings-page-wrapper { gap: 16px; }
-    .kpi-card { padding: 14px 16px; }
-    .kpi-value { font-size: 1.15rem; }
     .panel-body-content { padding: 14px 12px; }
     .btn-saas { width: 100%; justify-content: center; }
 }
@@ -953,6 +865,13 @@ include 'header.php';
         </div>
 
         <div class="settings-nav-tabs">
+            <div class="settings-nav-dropdown-wrap">
+                <select class="settings-nav-select" onchange="if(this.value) window.location.href=this.value;" aria-label="Console Preferences Navigation">
+                    <option value="settings" selected>Account Credentials &amp; Security</option>
+                    <option value="site_settings">Branding &amp; SMTP Infrastructure</option>
+                    <option value="office_location">Office GPS &amp; Geofencing</option>
+                </select>
+            </div>
             <a href="settings" class="btn-saas btn-saas-primary" title="Current: Account and Security Settings">
                 <i class="fa-solid fa-user-gear"></i>
                 <span>Account &amp; Security</span>
@@ -961,9 +880,9 @@ include 'header.php';
                 <i class="fa-solid fa-sliders"></i>
                 <span>Branding &amp; SMTP</span>
             </a>
-            <a href="office_location" class="btn-saas btn-saas-secondary" title="Navigate to Office GPS Location &amp; Attendance Geofencing">
+            <a href="gps_location" class="btn-saas btn-saas-secondary" title="Navigate to Office GPS Location &amp; Attendance Geofencing">
                 <i class="fa-solid fa-location-dot"></i>
-                <span>Office GPS</span>
+                <span>GPS Location</span>
             </a>
         </div>
     </div>
@@ -975,65 +894,6 @@ include 'header.php';
             <span><?php echo htmlspecialchars($flashMessage); ?></span>
         </div>
     <?php endif; ?>
-
-    <!-- ─── 4 Enterprise KPI Stat Metric Cards ────────────────────────────────── -->
-    <div class="settings-kpi-grid">
-        <!-- Card 1: Active Identity -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-indigo">
-                <i class="fa-solid fa-shield-halved"></i>
-            </div>
-            <div class="kpi-info">
-                <div class="kpi-label">Account Identity</div>
-                <div class="kpi-value" title="<?php echo htmlspecialchars($adminData['username']); ?>"><?php echo htmlspecialchars($adminData['username']); ?></div>
-                <div class="kpi-sub">
-                    <span class="badge-saas badge-clean" style="font-size: 0.7rem;"><i class="fa-solid fa-crown"></i> Super Administrator</span>
-                </div>
-            </div>
-        </div>
-
-        <!-- Card 2: Security Posture -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-emerald">
-                <i class="fa-solid fa-lock"></i>
-            </div>
-            <div class="kpi-info">
-                <div class="kpi-label">Security Posture</div>
-                <div class="kpi-value">Protected</div>
-                <div class="kpi-sub">
-                    <span><i class="fa-solid fa-check" style="color: #059669;"></i> Bcrypt Policy Enforced</span>
-                </div>
-            </div>
-        </div>
-
-        <!-- Card 3: Active Session -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-purple">
-                <i class="fa-solid fa-network-wired"></i>
-            </div>
-            <div class="kpi-info">
-                <div class="kpi-label">Session Telemetry</div>
-                <div class="kpi-value" title="<?php echo htmlspecialchars($clientIp); ?>"><?php echo htmlspecialchars($clientIp); ?></div>
-                <div class="kpi-sub">
-                    <span>30m Idle Timeout &bull; SameSite</span>
-                </div>
-            </div>
-        </div>
-
-        <!-- Card 4: Platform Engine -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-amber">
-                <i class="fa-solid fa-server"></i>
-            </div>
-            <div class="kpi-info">
-                <div class="kpi-label">Platform Engine</div>
-                <div class="kpi-value">PHP <?php echo htmlspecialchars(explode('-', $phpVersion)[0]); ?></div>
-                <div class="kpi-sub">
-                    <span title="<?php echo htmlspecialchars($dbVersion); ?>"><?php echo htmlspecialchars(explode('-', $dbVersion)[0]); ?> DB</span>
-                </div>
-            </div>
-        </div>
-    </div>
 
     <!-- ─── 2-Column Responsive Workspace Grid ───────────────────────────────── -->
     <div class="settings-workspace-layout">
@@ -1187,6 +1047,11 @@ include 'header.php';
                 </form>
             </div>
 
+        </section>
+
+        <!-- Column 2: Passkeys & Active Authorized Sessions -->
+        <aside>
+
             <!-- Card: Passkeys & Biometric Authentication (WebAuthn / FIDO2) -->
             <div class="settings-card-panel" style="margin-bottom: 24px;">
                 <div class="panel-header-banner" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
@@ -1213,144 +1078,7 @@ include 'header.php';
                 </div>
             </div>
 
-            <!-- Card: Office Geolocation & Attendance Boundaries -->
-            <div class="settings-card-panel" style="margin-bottom: 24px;">
-                <div class="panel-header-banner" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
-                    <div>
-                        <h2 class="panel-header-title">
-                            <i class="fa-solid fa-location-dot" style="color: #059669;"></i>
-                            <span>Office Location &amp; Attendance Geofencing</span>
-                        </h2>
-                        <p class="panel-header-subtitle">Define physical office boundaries and configure GPS geofence restrictions for on-site employee attendance.</p>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <a href="office_location" class="mini-btn" style="color: var(--adm-brand); border-color: var(--adm-brand); font-weight: 700; text-decoration: none;">
-                            <i class="fa-solid fa-map-location-dot"></i> Interactive Map
-                        </a>
-                        <?php if (!empty($officeLocationSettings['location_attendance_enabled'])): ?>
-                            <span class="badge-saas badge-clean" style="color: #059669; border-color: rgba(5,150,105,0.3); background: rgba(5,150,105,0.1);">
-                                <i class="fa-solid fa-circle-check"></i> Geofencing Active
-                            </span>
-                        <?php else: ?>
-                            <span class="badge-saas badge-clean" style="color: #d97706; border-color: rgba(217,119,6,0.3); background: rgba(217,119,6,0.1);">
-                                <i class="fa-solid fa-circle-pause"></i> Geofencing Disabled
-                            </span>
-                        <?php endif; ?>
-                    </div>
-                </div>
-
-                <form method="POST" action="" class="panel-body-content" id="officeLocationForm" style="padding: 24px;">
-                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrfTokenOfficeLocation); ?>">
-
-                    <?php $canManageSettings = Security::hasPermission('manage_settings', $adminId); ?>
-                    <?php if (!$canManageSettings): ?>
-                        <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #dc2626; padding: 12px 16px; border-radius: var(--adm-radius-md); font-size: 0.86rem; font-weight: 600; margin-bottom: 18px;">
-                            <i class="fa-solid fa-lock"></i> You have read-only access. Only authorized administrators with the <code>manage_settings</code> permission can update office geofencing parameters.
-                        </div>
-                    <?php endif; ?>
-
-                    <div class="form-group-item">
-                        <label for="office_name">Office Location Name *</label>
-                        <div class="input-with-icon-wrap">
-                            <i class="fa-solid fa-building input-prefix-icon"></i>
-                            <input type="text" id="office_name" name="office_name" class="form-control-saas" 
-                                value="<?php echo htmlspecialchars($officeLocationSettings['office_name'] ?? 'Cloud Aspire Headquarters'); ?>" 
-                                required maxlength="150" <?php echo !$canManageSettings ? 'readonly' : ''; ?>
-                                placeholder="e.g. Cloud Aspire Headquarters - Main Campus">
-                        </div>
-                    </div>
-
-                    <div class="form-group-item">
-                        <label for="office_address">Physical Address (Optional)</label>
-                        <div class="input-with-icon-wrap">
-                            <i class="fa-solid fa-map-pin input-prefix-icon"></i>
-                            <input type="text" id="office_address" name="office_address" class="form-control-saas" 
-                                value="<?php echo htmlspecialchars($officeLocationSettings['office_address'] ?? ''); ?>" 
-                                maxlength="255" <?php echo !$canManageSettings ? 'readonly' : ''; ?>
-                                placeholder="e.g. 123 Tech Boulevard, Puducherry, India">
-                        </div>
-                    </div>
-
-                    <div class="settings-form-row-2col">
-                        <div class="form-group-item" style="margin-bottom: 0;">
-                            <label for="office_latitude">Office Latitude *</label>
-                            <div class="input-with-icon-wrap">
-                                <i class="fa-solid fa-compass input-prefix-icon"></i>
-                                <input type="number" step="any" min="-90" max="90" id="office_latitude" name="office_latitude" class="form-control-saas" 
-                                    value="<?php echo htmlspecialchars((string)($officeLocationSettings['office_latitude'] ?? '11.94160000')); ?>" 
-                                    required <?php echo !$canManageSettings ? 'readonly' : ''; ?>
-                                    placeholder="e.g. 11.94160000">
-                            </div>
-                        </div>
-
-                        <div class="form-group-item" style="margin-bottom: 0;">
-                            <label for="office_longitude">Office Longitude *</label>
-                            <div class="input-with-icon-wrap">
-                                <i class="fa-solid fa-compass input-prefix-icon"></i>
-                                <input type="number" step="any" min="-180" max="180" id="office_longitude" name="office_longitude" class="form-control-saas" 
-                                    value="<?php echo htmlspecialchars((string)($officeLocationSettings['office_longitude'] ?? '79.80830000')); ?>" 
-                                    required <?php echo !$canManageSettings ? 'readonly' : ''; ?>
-                                    placeholder="e.g. 79.80830000">
-                            </div>
-                        </div>
-                    </div>
-
-                    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; padding: 12px 14px; background: var(--adm-surface-subtle); border: 1px solid var(--adm-border-subtle); border-radius: var(--adm-radius-md);">
-                        <div style="font-size: 0.82rem; color: var(--adm-muted);">
-                            <i class="fa-solid fa-satellite-dish" style="color: var(--adm-brand); margin-right: 4px;"></i>
-                            Auto-capture coordinates or verify location on satellite map:
-                        </div>
-                        <div style="display: flex; gap: 8px;">
-                            <?php if ($canManageSettings): ?>
-                                <button type="button" class="mini-btn" id="btnDetectGps" onclick="detectAdminCoordinates()" title="Use browser GPS to fill coordinates with your current position">
-                                    <i class="fa-solid fa-crosshairs"></i> Detect My GPS
-                                </button>
-                            <?php endif; ?>
-                            <a id="btnMapPreview" href="https://www.google.com/maps?q=<?php echo urlencode($officeLocationSettings['office_latitude'] . ',' . $officeLocationSettings['office_longitude']); ?>" target="_blank" rel="noopener noreferrer" class="mini-btn" title="Open configured coordinates in Google Maps">
-                                <i class="fa-solid fa-map-location-dot"></i> View on Maps
-                            </a>
-                        </div>
-                    </div>
-
-                    <div class="settings-form-row-2col" style="margin-bottom: 20px;">
-                        <div class="form-group-item" style="margin-bottom: 0;">
-                            <label for="office_radius_meters">Allowed Attendance Radius (Meters) *</label>
-                            <div class="input-with-icon-wrap">
-                                <i class="fa-solid fa-circle-dot input-prefix-icon"></i>
-                                <input type="number" min="10" max="50000" id="office_radius_meters" name="office_radius_meters" class="form-control-saas" 
-                                    value="<?php echo htmlspecialchars((string)($officeLocationSettings['office_radius_meters'] ?? '100')); ?>" 
-                                    required <?php echo !$canManageSettings ? 'readonly' : ''; ?>
-                                    placeholder="e.g. 100">
-                            </div>
-                            <small style="font-size: 0.75rem; color: var(--adm-muted); margin-top: 4px; display: block;">
-                                Configurable default: 100 meters (maximum distance allowed from office center).
-                            </small>
-                        </div>
-
-                        <div class="form-group-item" style="margin-bottom: 0;">
-                            <label style="margin-bottom: 8px; display: block;">Enforce Location Restrictions</label>
-                            <label style="display: flex; align-items: center; gap: 10px; cursor: <?php echo $canManageSettings ? 'pointer' : 'not-allowed'; ?>; padding: 10px 14px; background: var(--adm-surface-subtle); border: 1.5px solid var(--adm-border-subtle); border-radius: var(--adm-radius-md); font-size: 0.88rem; font-weight: 600; color: var(--adm-text-main);">
-                                <input type="checkbox" name="location_attendance_enabled" value="1" <?php echo !empty($officeLocationSettings['location_attendance_enabled']) ? 'checked' : ''; ?> <?php echo !$canManageSettings ? 'disabled' : ''; ?> style="width: 18px; height: 18px; accent-color: var(--adm-brand);">
-                                <span>Enable Location-Based Attendance</span>
-                            </label>
-                            <small style="font-size: 0.75rem; color: var(--adm-muted); margin-top: 4px; display: block;">
-                                When enabled, on-site employees must check in within the allowed radius. Remote (WFH) employees bypass geofencing.
-                            </small>
-                        </div>
-                    </div>
-
-                    <?php if ($canManageSettings): ?>
-                        <div class="panel-footer-actions">
-                            <button type="submit" name="update_office_location" class="btn-saas btn-saas-primary">
-                                <i class="fa-solid fa-floppy-disk"></i>
-                                <span>Save Office Geofencing Settings</span>
-                            </button>
-                        </div>
-                    <?php endif; ?>
-                </form>
-            </div>
-
-            <!-- Card 3: Active Authorized Sessions & Device Access -->
+            <!-- Card: Active Authorized Sessions & Device Access -->
             <div class="settings-card-panel">
                 <div class="panel-header-banner">
                     <div>
@@ -1451,137 +1179,71 @@ include 'header.php';
                         </div>
                     <?php endif; ?>
 
-                    <!-- Simulated session test helper for verification -->
-                    <div style="margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--adm-border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <!-- Active session security policy notice -->
+                    <div style="margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--adm-border-subtle); display: flex; align-items: center; gap: 8px;">
                         <span style="font-size: 0.76rem; color: var(--adm-muted);">
                             <i class="fa-solid fa-shield-halved" style="color: var(--adm-brand); margin-right: 4px;"></i>
-                            Sessions expire after 30 minutes of inactivity or upon remote termination.
+                            Sessions expire automatically after 30 minutes of inactivity or upon remote termination.
                         </span>
-                        <form method="POST" action="" style="margin: 0;">
-                            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrfTokenSimulate); ?>">
-                            <button type="submit" name="simulate_session" class="mini-btn" style="font-size: 0.74rem;" title="Simulate an authorized mobile device session for testing termination">
-                                <i class="fa-solid fa-plus"></i> Simulate Mobile Session (Test)
-                            </button>
-                        </form>
                     </div>
                 </div>
             </div>
 
-        </section>
-
-        <!-- Column 2: System Environment Telemetry & Security Shield -->
-        <aside>
-
-            <!-- Card 3: Platform Telemetry & Environment Specs -->
-            <div class="settings-card-panel">
-                <div class="panel-header-banner">
+            <!-- Card: Employee Panel Index Page Status & Access Control -->
+            <div class="settings-card-panel" style="margin-top: 24px;">
+                <div class="panel-header-banner" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
                     <div>
-                        <h3 class="panel-header-title">
-                            <i class="fa-solid fa-microchip" style="color: var(--adm-brand);"></i>
-                            <span>Platform Environment Telemetry</span>
-                        </h3>
-                        <p class="panel-header-subtitle">Server infrastructure and runtime execution profile.</p>
+                        <h2 class="panel-header-title">
+                            <i class="fa-solid fa-power-off" style="color: var(--adm-brand);"></i>
+                            <span>Employee Panel Access Control</span>
+                        </h2>
+                        <p class="panel-header-subtitle">Toggle employee and public access to the Employee Panel index page.</p>
                     </div>
+                    <?php if ($empIndexStatus): ?>
+                        <span class="badge-saas" style="background: var(--adm-success-light); color: var(--adm-success); border: 1px solid rgba(5, 150, 105, 0.25); font-size: 0.74rem; padding: 3px 10px; border-radius: 9999px; font-weight: 700;">
+                            <i class="fa-solid fa-circle-check"></i> ON &bull; Live Access
+                        </span>
+                    <?php else: ?>
+                        <span class="badge-saas" style="background: var(--adm-danger-light); color: var(--adm-danger); border: 1px solid var(--adm-danger-border); font-size: 0.74rem; padding: 3px 10px; border-radius: 9999px; font-weight: 700;">
+                            <i class="fa-solid fa-circle-xmark"></i> OFF &bull; Offline Notice
+                        </span>
+                    <?php endif; ?>
                 </div>
 
-                <div class="panel-body-content">
-                    <dl class="telemetry-dl">
-                        <div class="telemetry-row">
-                            <dt class="telemetry-label"><i class="fa-brands fa-php" style="color: #8892bf; font-size: 1rem;"></i> PHP Engine</dt>
-                            <dd class="telemetry-val"><?php echo htmlspecialchars($phpVersion); ?></dd>
-                        </div>
-
-                        <div class="telemetry-row">
-                            <dt class="telemetry-label"><i class="fa-solid fa-database" style="color: #f59e0b;"></i> Database Server</dt>
-                            <dd class="telemetry-val" title="<?php echo htmlspecialchars($dbVersion); ?>"><?php echo htmlspecialchars(explode('-', $dbVersion)[0]); ?> MariaDB</dd>
-                        </div>
-
-                        <div class="telemetry-row">
-                            <dt class="telemetry-label"><i class="fa-solid fa-server" style="color: var(--adm-brand);"></i> Web Server</dt>
-                            <dd class="telemetry-val"><?php echo htmlspecialchars(explode(' ', $serverSoftware)[0]); ?></dd>
-                        </div>
-
-                        <div class="telemetry-row">
-                            <dt class="telemetry-label"><i class="fa-solid fa-memory" style="color: #10b981;"></i> Memory Allocation</dt>
-                            <dd class="telemetry-val"><?php echo htmlspecialchars($memoryLimit); ?></dd>
-                        </div>
-
-                        <div class="telemetry-row">
-                            <dt class="telemetry-label"><i class="fa-solid fa-file-arrow-up" style="color: #06b6d4;"></i> Upload Max Filesize</dt>
-                            <dd class="telemetry-val"><?php echo htmlspecialchars($uploadMax); ?></dd>
-                        </div>
-
-                        <div class="telemetry-row">
-                            <dt class="telemetry-label"><i class="fa-solid fa-clock" style="color: #8b5cf6;"></i> System Timezone</dt>
-                            <dd class="telemetry-val"><?php echo htmlspecialchars($currentTimezone); ?></dd>
-                        </div>
-
-                        <div class="telemetry-row">
-                            <dt class="telemetry-label"><i class="fa-solid fa-calendar-check" style="color: #64748b;"></i> Admin Registration</dt>
-                            <dd class="telemetry-val"><?php echo htmlspecialchars($memberSince); ?></dd>
-                        </div>
-                    </dl>
-                </div>
-            </div>
-
-            <!-- Card 4: Security Shield & Policy Audit -->
-            <div class="settings-card-panel">
-                <div class="panel-header-banner">
-                    <div>
-                        <h3 class="panel-header-title">
-                            <i class="fa-solid fa-shield-heart" style="color: #059669;"></i>
-                            <span>Security Defense &amp; Audit Status</span>
-                        </h3>
-                        <p class="panel-header-subtitle">Active protections safeguarding console operations.</p>
-                    </div>
-                </div>
-
-                <div class="panel-body-content">
-                    <dl class="telemetry-dl">
-                        <div class="telemetry-row">
-                            <dt class="telemetry-label"><i class="fa-solid fa-shield-virus" style="color: #059669;"></i> CSRF Mitigation</dt>
-                            <dd><span class="badge-saas badge-clean"><i class="fa-solid fa-check"></i> Per-Form Tokens</span></dd>
-                        </div>
-
-                        <div class="telemetry-row">
-                            <dt class="telemetry-label"><i class="fa-solid fa-cookie-bite" style="color: #059669;"></i> Cookie Hardening</dt>
-                            <dd><span class="badge-saas badge-clean"><i class="fa-solid fa-check"></i> HttpOnly / Lax</span></dd>
-                        </div>
-
-                        <div class="telemetry-row">
-                            <dt class="telemetry-label"><i class="fa-solid fa-user-clock" style="color: #059669;"></i> Session Inactivity</dt>
-                            <dd><span class="badge-saas badge-clean">30 Min Idle Auto-Exp</span></dd>
-                        </div>
-
-                        <div class="telemetry-row">
-                            <dt class="telemetry-label"><i class="fa-solid fa-sliders" style="color: var(--adm-brand);"></i> Platform Branding</dt>
-                            <dd><a href="site_settings" style="color: var(--adm-brand); font-weight: 700; text-decoration: none; font-size: 0.8rem;"><i class="fa-solid fa-arrow-up-right-from-square"></i> Configure Brand</a></dd>
-                        </div>
-                    </dl>
-                </div>
-            </div>
-
-            <!-- Card 5: Danger Zone / Session Termination -->
-            <div class="settings-card-panel" style="border-color: rgba(239, 68, 68, 0.3);">
-                <div class="panel-header-banner" style="background: rgba(239, 68, 68, 0.04);">
-                    <div>
-                        <h3 class="panel-header-title" style="color: #dc2626;">
-                            <i class="fa-solid fa-triangle-exclamation"></i>
-                            <span>Session Termination</span>
-                        </h3>
-                        <p class="panel-header-subtitle">End active authorization and destroy the current session token.</p>
-                    </div>
-                </div>
-
-                <div class="panel-body-content">
-                    <p style="font-size: 0.82rem; color: var(--adm-muted); margin-bottom: 16px;">
-                        Logging out terminates your authenticated session cookie and clears all administrative authorization privileges on this device.
+                <div class="panel-body-content" style="padding: 18px 24px;">
+                    <p style="font-size: 0.84rem; color: var(--adm-muted); margin-bottom: 16px; line-height: 1.5;">
+                        <?php if ($empIndexStatus): ?>
+                            The Employee Panel index page is currently accessible normally. Employees can view portal details and proceed to login.
+                        <?php else: ?>
+                            The Employee Panel index page is offline. Employees and visitors see a clean offline notice. The Admin Panel remains fully accessible.
+                        <?php endif; ?>
                     </p>
 
-                    <a href="logout" class="btn-saas btn-saas-danger" style="width: 100%;" onclick="return confirm('Are you sure you wish to terminate your administrative session and log out?');">
-                        <i class="fa-solid fa-right-from-bracket"></i>
-                        <span>Terminate Session &amp; Logout</span>
-                    </a>
+                    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                        <form method="POST" action="" style="margin: 0; display: inline;">
+                            <input type="hidden" name="action" value="toggle_employee_index">
+                            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrfTokenSettingsToggle); ?>">
+                            <input type="hidden" name="employee_index_enabled" value="<?php echo $empIndexStatus ? '0' : '1'; ?>">
+                            <button type="submit" class="btn-saas" style="padding: 8px 16px; font-size: 0.82rem; font-weight: 700; cursor: pointer; border-radius: var(--adm-radius-md); background: <?php echo $empIndexStatus ? '#e11d48' : '#059669'; ?>; color: #fff; border: none; display: inline-flex; align-items: center; gap: 6px;">
+                                <i class="fa-solid fa-power-off"></i>
+                                <span><?php echo $empIndexStatus ? 'Turn OFF Index Page' : 'Turn ON Index Page'; ?></span>
+                            </button>
+                        </form>
+                        <a href="site_settings" class="btn-saas btn-saas-secondary" style="font-size: 0.82rem;">
+                            <i class="fa-solid fa-sliders"></i>
+                            <span>Site Settings</span>
+                        </a>
+                        <a href="/" target="_blank" class="btn-saas btn-saas-secondary" style="font-size: 0.82rem;">
+                            <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                            <span>View Site</span>
+                        </a>
+                        <?php if (!$empIndexStatus): ?>
+                            <a href="/?preview=1" target="_blank" class="btn-saas btn-saas-secondary" style="font-size: 0.82rem;">
+                                <i class="fa-solid fa-eye"></i>
+                                <span>Preview</span>
+                            </a>
+                        <?php endif; ?>
+                    </div>
                 </div>
             </div>
 
@@ -1998,47 +1660,6 @@ function verifyPasswordMatch() {
     document.addEventListener('DOMContentLoaded', () => {
         loadAdminPasskeys();
     });
-
-    // Detect browser coordinates for Office Geofencing setup
-    function detectAdminCoordinates() {
-        const btn = document.getElementById('btnDetectGps');
-        if (!navigator.geolocation) {
-            alert("Geolocation is not supported by your browser.");
-            return;
-        }
-        if (btn) {
-            btn.disabled = true;
-            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Detecting...';
-        }
-
-        navigator.geolocation.getCurrentPosition(
-            function(position) {
-                const lat = position.coords.latitude.toFixed(8);
-                const lng = position.coords.longitude.toFixed(8);
-                document.getElementById('office_latitude').value = lat;
-                document.getElementById('office_longitude').value = lng;
-                const mapLink = document.getElementById('btnMapPreview');
-                if (mapLink) {
-                    mapLink.href = 'https://www.google.com/maps?q=' + lat + ',' + lng;
-                }
-                if (btn) {
-                    btn.disabled = false;
-                    btn.innerHTML = '<i class="fa-solid fa-check"></i> GPS Filled!';
-                    setTimeout(() => {
-                        btn.innerHTML = '<i class="fa-solid fa-crosshairs"></i> Detect My GPS';
-                    }, 3000);
-                }
-            },
-            function(err) {
-                if (btn) {
-                    btn.disabled = false;
-                    btn.innerHTML = '<i class="fa-solid fa-crosshairs"></i> Detect My GPS';
-                }
-                alert("Unable to detect coordinates: " + err.message);
-            },
-            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-        );
-    }
 </script>
 
 <?php include 'footer.php'; ?>

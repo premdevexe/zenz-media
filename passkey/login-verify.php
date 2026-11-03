@@ -7,6 +7,16 @@ require_once __DIR__ . '/config.php';
 
 use lbuchs\WebAuthn\Binary\ByteBuffer;
 
+// Enforce rate limiting on passkey verification attempts (15 attempts / 60 seconds per IP)
+$rateLimit = Security::checkRateLimit('pk_login_verify', Security::getClientIp(), 15, 60);
+if (!$rateLimit['allowed']) {
+    sendJsonResponse([
+        'success' => false,
+        'message' => $rateLimit['message'],
+        'retry_after' => $rateLimit['retry_after']
+    ], 429);
+}
+
 // Ensure challenge is present in session
 if (empty($_SESSION['webauthn_auth_challenge'])) {
     sendJsonResponse([
@@ -232,6 +242,6 @@ try {
     error_log("Passkey Login Verify Error: " . $e->getMessage());
     sendJsonResponse([
         'success' => false,
-        'message' => 'Passkey verification failed: ' . $e->getMessage()
+        'message' => 'Passkey cryptographic verification failed. Please try again or use your password.'
     ], 401);
 }

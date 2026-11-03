@@ -572,75 +572,91 @@ include 'header.php';
     transform: translateY(-1px);
 }
 
-/* KPI Stat Cards Grid */
+/* KPI Stat Cards Grid (Consistent with Employee Directory) */
 .shifts-kpi-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
     gap: 16px;
     margin-bottom: 24px;
 }
 .kpi-card {
-    background: var(--saas-card-bg);
-    border: 1px solid var(--saas-border);
-    border-radius: var(--adm-radius-xl);
+    background: var(--adm-surface, var(--saas-card-bg));
+    border: 1px solid var(--adm-border, var(--saas-border));
+    border-radius: var(--adm-radius-lg);
     padding: 20px;
     display: flex;
-    align-items: center;
-    gap: 16px;
-    box-shadow: var(--adm-shadow-card);
-    transition: transform var(--adm-transition), box-shadow var(--adm-transition);
+    align-items: flex-start;
+    justify-content: space-between;
     position: relative;
     overflow: hidden;
+    box-shadow: var(--adm-shadow-card);
+    transition: all var(--adm-transition);
 }
 .kpi-card:hover {
-    transform: translateY(-2px);
+    transform: translateY(-3px);
     box-shadow: var(--adm-shadow-hover);
+    border-color: var(--adm-brand-border);
 }
-.kpi-icon-wrap {
-    width: 48px;
-    height: 48px;
-    border-radius: var(--adm-radius-lg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.3rem;
-    flex-shrink: 0;
+.kpi-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 3px;
+    background: transparent;
+    transition: background var(--adm-transition);
 }
-.kpi-icon-indigo { background: rgba(79, 70, 229, 0.12); color: #4f46e5; }
-.kpi-icon-emerald { background: rgba(5, 150, 105, 0.12); color: #059669; }
-.kpi-icon-amber { background: rgba(217, 119, 6, 0.12); color: #d97706; }
-.kpi-icon-purple { background: rgba(147, 51, 234, 0.12); color: #9333ea; }
+.kpi-card--shifts::before   { background: linear-gradient(90deg, #4f46e5, #7c3aed); }
+.kpi-card--active::before   { background: linear-gradient(90deg, #059669, #10b981); }
+.kpi-card--duration::before { background: linear-gradient(90deg, #8b5cf6, #a855f7); }
+.kpi-card--grace::before    { background: linear-gradient(90deg, #d97706, #f59e0b); }
+
 .kpi-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
     min-width: 0;
-    flex: 1;
 }
 .kpi-label {
-    font-size: 0.78rem;
+    font-size: 0.8rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--saas-text-muted);
-    margin-bottom: 4px;
+    letter-spacing: 0.04em;
+    color: var(--adm-muted, var(--saas-text-muted));
 }
 .kpi-value {
     font-family: 'Outfit', sans-serif;
-    font-size: 1.45rem;
+    font-size: 1.75rem;
     font-weight: 800;
-    color: var(--saas-text-main);
-    line-height: 1.2;
+    color: var(--adm-text-main, var(--saas-text-main));
+    line-height: 1.1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 .kpi-sub {
     font-size: 0.78rem;
-    font-weight: 600;
-    color: var(--saas-text-muted);
-    margin-top: 4px;
+    color: var(--adm-faint, var(--saas-text-muted));
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
+    margin-top: 2px;
 }
+.kpi-icon-wrap {
+    width: 44px;
+    height: 44px;
+    border-radius: var(--adm-radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.25rem;
+    flex-shrink: 0;
+}
+.kpi-icon-indigo  { background: var(--adm-brand-light, rgba(79, 70, 229, 0.12)); color: var(--adm-brand, #4f46e5); }
+.kpi-icon-emerald { background: var(--adm-success-light, rgba(5, 150, 105, 0.12)); color: var(--adm-success, #059669); }
+.kpi-icon-purple  { background: rgba(139, 92, 246, 0.14); color: #8b5cf6; }
+.kpi-icon-amber   { background: var(--adm-warning-light, rgba(217, 119, 6, 0.12)); color: var(--adm-warning, #d97706); }
 
 /* Control Toolbar & View Switcher */
 .shifts-toolbar {
@@ -1251,70 +1267,70 @@ include 'header.php';
 <!-- ─── Enterprise KPI Stat Cards ────────────────────────────────────────────── -->
 <div class="shifts-kpi-grid">
     <!-- Card 1: Total Configured Shifts -->
-    <div class="kpi-card">
-        <div class="kpi-icon-wrap kpi-icon-indigo">
-            <i class="fa-solid fa-business-time"></i>
-        </div>
+    <div class="kpi-card kpi-card--shifts">
         <div class="kpi-info">
-            <div class="kpi-label">Configured Shifts</div>
-            <div class="kpi-value"><?php echo $totalShiftsCount; ?></div>
-            <div class="kpi-sub">
-                <span style="color: #059669;"><i class="fa-solid fa-circle-check"></i> 1 Active</span>
+            <span class="kpi-label">Configured Shifts</span>
+            <span class="kpi-value"><?php echo $totalShiftsCount; ?></span>
+            <span class="kpi-sub">
+                <span style="color: var(--adm-success);"><i class="fa-solid fa-circle-check"></i> 1 Active</span>
                 <span>&bull;</span>
                 <span><?php echo $standbyCount; ?> Standby</span>
-            </div>
+            </span>
+        </div>
+        <div class="kpi-icon-wrap kpi-icon-indigo">
+            <i class="fa-solid fa-business-time"></i>
         </div>
     </div>
 
     <!-- Card 2: Active Enterprise Shift -->
-    <div class="kpi-card">
-        <div class="kpi-icon-wrap kpi-icon-emerald">
-            <i class="fa-solid fa-clock"></i>
-        </div>
+    <div class="kpi-card kpi-card--active">
         <div class="kpi-info">
-            <div class="kpi-label">Active Shift Policy</div>
-            <div class="kpi-value" title="<?php echo htmlspecialchars($activeShift['shift_name'] ?? 'None'); ?>">
+            <span class="kpi-label">Active Shift Policy</span>
+            <span class="kpi-value" title="<?php echo htmlspecialchars($activeShift['shift_name'] ?? 'None'); ?>">
                 <?php echo htmlspecialchars($activeShift['shift_name'] ?? 'None'); ?>
-            </div>
-            <div class="kpi-sub">
+            </span>
+            <span class="kpi-sub">
                 <?php if ($activeShift): ?>
                     <span><?php echo date('h:i A', strtotime($activeShift['checkin_start'])); ?> &ndash; <?php echo date('h:i A', strtotime($activeShift['checkout_time'])); ?></span>
                 <?php else: ?>
                     <span style="color: var(--adm-danger);">No shift active</span>
                 <?php endif; ?>
-            </div>
+            </span>
+        </div>
+        <div class="kpi-icon-wrap kpi-icon-emerald">
+            <i class="fa-solid fa-clock"></i>
         </div>
     </div>
 
     <!-- Card 3: Standard Shift Duration -->
-    <div class="kpi-card">
-        <div class="kpi-icon-purple kpi-icon-wrap">
-            <i class="fa-solid fa-hourglass-half"></i>
-        </div>
+    <div class="kpi-card kpi-card--duration">
         <div class="kpi-info">
-            <div class="kpi-label">Shift Duration</div>
-            <div class="kpi-value"><?php echo $activeDurationText; ?></div>
-            <div class="kpi-sub">
+            <span class="kpi-label">Shift Duration</span>
+            <span class="kpi-value"><?php echo $activeDurationText; ?></span>
+            <span class="kpi-sub">
                 <?php if ($activeShift): ?>
                     <span>Check-in: <?php echo date('h:i A', strtotime($activeShift['checkin_start'])); ?> to <?php echo date('h:i A', strtotime($activeShift['checkin_end'])); ?></span>
                 <?php else: ?>
                     <span>Standard Workday</span>
                 <?php endif; ?>
-            </div>
+            </span>
+        </div>
+        <div class="kpi-icon-purple kpi-icon-wrap">
+            <i class="fa-solid fa-hourglass-half"></i>
         </div>
     </div>
 
     <!-- Card 4: Grace & Penalty Tolerance -->
-    <div class="kpi-card">
+    <div class="kpi-card kpi-card--grace">
+        <div class="kpi-info">
+            <span class="kpi-label">Grace &amp; Tolerances</span>
+            <span class="kpi-value"><?php echo ($activeShift['grace_minutes'] ?? $avgGrace); ?>m Grace</span>
+            <span class="kpi-sub">
+                <span>Late mark after <?php echo ($activeShift['late_threshold'] ?? 30); ?>m</span>
+            </span>
+        </div>
         <div class="kpi-icon-wrap kpi-icon-amber">
             <i class="fa-solid fa-shield-halved"></i>
-        </div>
-        <div class="kpi-info">
-            <div class="kpi-label">Grace &amp; Tolerances</div>
-            <div class="kpi-value"><?php echo ($activeShift['grace_minutes'] ?? $avgGrace); ?>m Grace</div>
-            <div class="kpi-sub">
-                <span>Late mark after <?php echo ($activeShift['late_threshold'] ?? 30); ?>m</span>
-            </div>
         </div>
     </div>
 </div>

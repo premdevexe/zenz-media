@@ -10,13 +10,18 @@ Security::initSecureSession();
 
 // Check if admin is logged in and session is active
 if (!Security::isAuthenticated()) {
-    header("Location: ../admin");
+    if (isset($_SESSION['employee_logged_in']) && $_SESSION['employee_logged_in'] === true) {
+        // Regular employee without admin privileges attempting to access admin panel
+        header("Location: /employee_dashboard");
+        exit();
+    }
+    header("Location: /login.php");
     exit();
 }
 
 // Track active session
+$currentAdminId = $_SESSION['admin_id'] ?? 1;
 if (isset($pdo) && $pdo instanceof PDO) {
-    $currentAdminId = $_SESSION['admin_id'] ?? 1;
     Security::trackCurrentSession($currentAdminId, 'admin');
 }
 
@@ -24,7 +29,7 @@ if (isset($pdo) && $pdo instanceof PDO) {
 $activeSiteSettings = null;
 if (isset($pdo) && $pdo instanceof PDO) {
     try {
-        $stmt = $pdo->query("SELECT site_name, logo, favicon FROM site_settings WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1");
+        $stmt = $pdo->query("SELECT site_name, logo, favicon, employee_index_enabled FROM site_settings WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1");
         $activeSiteSettings = $stmt->fetch(PDO::FETCH_ASSOC);
     } catch (PDOException $e) {}
 }
@@ -33,20 +38,29 @@ $adminBrandLogo    = !empty($activeSiteSettings['logo']) ? '/assets/uploads/site
 $adminBrandFavicon = !empty($activeSiteSettings['favicon']) ? '/assets/uploads/site/' . rawurlencode($activeSiteSettings['favicon']) : null;
 
 $adminUsername = $_SESSION['admin_username'] ?? 'Administrator';
+$adminRoleName = $_SESSION['role_name'] ?? 'Super Admin';
 $adminInitials = strtoupper(substr($adminUsername, 0, 2)) ?: 'AD';
 
-$adminNavLinks = [
-    'employee'      => ['label' => 'Employees',     'icon' => 'fa-users'],
-    'roles'         => ['label' => 'Roles & RBAC',  'icon' => 'fa-user-shield'],
-    'attendance'    => ['label' => 'Attendance',    'icon' => 'fa-calendar-check'],
-    'working_days'  => ['label' => 'Working Days',  'icon' => 'fa-calendar-days'],
-    'task'          => ['label' => 'Tasks',         'icon' => 'fa-list-check'],
-    'project'       => ['label' => 'Projects',      'icon' => 'fa-folder-open'],
-    'leave'         => ['label' => 'Leaves',        'icon' => 'fa-calendar-xmark'],
-    'shifts'        => ['label' => 'Shifts',        'icon' => 'fa-business-time'],
-    'reports'       => ['label' => 'Reports',       'icon' => 'fa-chart-pie'],
-    'settings'      => ['label' => 'Settings',      'icon' => 'fa-gear'],
+$adminAllNavLinks = [
+    'employee'      => ['label' => 'Employees',     'icon' => 'fa-users',          'perm' => 'employees.view'],
+    'roles'         => ['label' => 'Roles & RBAC',  'icon' => 'fa-user-shield',    'perm' => 'roles.view'],
+    'attendance'    => ['label' => 'Attendance',    'icon' => 'fa-calendar-check', 'perm' => 'attendance.view'],
+    'working_days'  => ['label' => 'Working Days',  'icon' => 'fa-calendar-days',  'perm' => 'attendance.view'],
+    'task'          => ['label' => 'Tasks',         'icon' => 'fa-list-check',     'perm' => 'tasks.view'],
+    'project'       => ['label' => 'Projects',      'icon' => 'fa-folder-open',    'perm' => 'projects.view'],
+    'leave'         => ['label' => 'Leaves',        'icon' => 'fa-calendar-xmark', 'perm' => 'leaves.view'],
+    'shifts'        => ['label' => 'Shifts',        'icon' => 'fa-business-time',  'perm' => 'shifts.view'],
+    'reports'       => ['label' => 'Reports',       'icon' => 'fa-chart-pie',      'perm' => 'reports.view'],
+    'gps_location'  => ['label' => 'GPS Location',  'icon' => 'fa-location-dot',   'perm' => 'settings.view'],
+    'settings'      => ['label' => 'Settings',      'icon' => 'fa-gear',           'perm' => 'settings.view'],
 ];
+
+$adminNavLinks = [];
+foreach ($adminAllNavLinks as $pageKey => $navItem) {
+    if (empty($navItem['perm']) || Security::hasPermission($navItem['perm'], $currentAdminId)) {
+        $adminNavLinks[$pageKey] = $navItem;
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -318,9 +332,10 @@ $adminNavLinks = [
             color: var(--adm-text-main);
         }
         .adm-sidebar-logo-img {
-            height: 32px;
-            max-width: 140px;
+            height: 38px;
+            max-width: 180px;
             object-fit: contain;
+            display: block;
         }
         .adm-sidebar-close {
             width: 32px;
@@ -433,24 +448,25 @@ $adminNavLinks = [
             flex-shrink: 0;
         }
         .adm-brand-logo-img {
-            height: 38px;
-            max-width: 170px;
+            height: 46px;
+            max-width: 220px;
             object-fit: contain;
+            display: block;
             transition: transform var(--adm-transition);
         }
         .adm-brand-logo-img:hover {
             transform: scale(1.02);
         }
         .adm-brand-icon {
-            width: 40px;
-            height: 40px;
+            width: 44px;
+            height: 44px;
             border-radius: var(--adm-radius-md);
             background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #ec4899 100%);
             color: #ffffff;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 1.15rem;
+            font-size: 1.25rem;
             box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35);
             transition: transform var(--adm-transition);
         }
@@ -1010,10 +1026,19 @@ $adminNavLinks = [
 
             <!-- Right Side Controls -->
             <div class="adm-nav-actions">
+                <!-- Shortcut to Employee Portal Workspace -->
+                <a href="/employee_dashboard" class="adm-link-portal" title="Open My Employee Portal & Personal Timesheet">
+                    <i class="fa-solid fa-user-tie"></i>
+                    <span>Employee Portal</span>
+                </a>
+
                 <!-- Shortcut to Public Site -->
-                <a href="/" target="_blank" class="adm-link-portal" title="Open public portal">
+                <a href="/" target="_blank" class="adm-link-portal" title="Open public portal<?php echo (isset($activeSiteSettings['employee_index_enabled']) && (int)$activeSiteSettings['employee_index_enabled'] === 0) ? ' (Index Page is OFF)' : ''; ?>">
                     <i class="fa-solid fa-arrow-up-right-from-square"></i>
                     <span>View Site</span>
+                    <?php if (isset($activeSiteSettings['employee_index_enabled']) && (int)$activeSiteSettings['employee_index_enabled'] === 0): ?>
+                        <span style="font-size: 0.65rem; background: var(--adm-danger); color: #fff; padding: 1px 6px; border-radius: 9999px; font-weight: 700; margin-left: 2px;">OFF</span>
+                    <?php endif; ?>
                 </a>
 
                 <!-- Theme Toggle Button -->
@@ -1027,7 +1052,7 @@ $adminNavLinks = [
                         <div class="adm-user-avatar"><?php echo $adminInitials; ?></div>
                         <div class="adm-user-meta">
                             <span class="adm-user-name"><?php echo htmlspecialchars($adminUsername); ?></span>
-                            <span class="adm-user-role">Super Admin</span>
+                            <span class="adm-user-role"><?php echo htmlspecialchars($adminRoleName); ?></span>
                         </div>
                         <i class="fa-solid fa-chevron-down adm-user-caret"></i>
                     </button>
@@ -1036,9 +1061,21 @@ $adminNavLinks = [
                             <div class="adm-user-dropdown-avatar"><?php echo $adminInitials; ?></div>
                             <div class="adm-user-dropdown-info">
                                 <span class="adm-user-dropdown-name"><?php echo htmlspecialchars($adminUsername); ?></span>
-                                <span class="adm-user-dropdown-role">Super Admin</span>
+                                <span class="adm-user-dropdown-role"><?php echo htmlspecialchars($adminRoleName); ?></span>
                             </div>
                         </div>
+                        <div class="adm-user-dropdown-divider"></div>
+                        <a href="/employee_dashboard" class="adm-user-dropdown-item" role="menuitem" title="My Employee Portal & Timesheet Desk">
+                            <i class="fa-solid fa-id-badge"></i>
+                            <span>My Employee Portal</span>
+                        </a>
+                        <?php if (Security::hasPermission('settings.view', $currentAdminId)): ?>
+                            <div class="adm-user-dropdown-divider"></div>
+                            <a href="settings" class="adm-user-dropdown-item" id="adminHeaderCredentialsLink" role="menuitem" title="Account Credentials and Security Settings">
+                                <i class="fa-solid fa-user-shield"></i>
+                                <span>Account Credentials</span>
+                            </a>
+                        <?php endif; ?>
                         <div class="adm-user-dropdown-divider"></div>
                         <a href="logout" class="adm-user-dropdown-item adm-user-dropdown-item--danger" id="adminHeaderLogoutBtn" role="menuitem" title="Sign out of Admin Console">
                             <i class="fa-solid fa-arrow-right-from-bracket"></i>
@@ -1056,7 +1093,8 @@ $adminNavLinks = [
                     <?php foreach ($adminNavLinks as $pageKey => $navItem): ?>
                         <?php 
                             $isActive = (($currentPage ?? '') === $pageKey);
-                            if ($pageKey === 'settings' && in_array(($currentPage ?? ''), ['settings', 'site_settings', 'office_location'], true)) $isActive = true;
+                            if ($pageKey === 'settings' && in_array(($currentPage ?? ''), ['settings', 'site_settings'], true)) $isActive = true;
+                            if ($pageKey === 'gps_location' && in_array(($currentPage ?? ''), ['gps_location', 'office_location'], true)) $isActive = true;
                             if ($pageKey === 'attendance' && in_array(($currentPage ?? ''), ['attendance', 'attendance_requests'], true)) $isActive = true;
                         ?>
                         <a href="<?php echo $pageKey; ?>" 
@@ -1095,7 +1133,8 @@ $adminNavLinks = [
                 <?php foreach ($adminNavLinks as $pageKey => $navItem): ?>
                     <?php 
                         $isActive = (($currentPage ?? '') === $pageKey);
-                        if ($pageKey === 'settings' && in_array(($currentPage ?? ''), ['settings', 'site_settings', 'office_location'], true)) $isActive = true;
+                        if ($pageKey === 'settings' && in_array(($currentPage ?? ''), ['settings', 'site_settings'], true)) $isActive = true;
+                        if ($pageKey === 'gps_location' && in_array(($currentPage ?? ''), ['gps_location', 'office_location'], true)) $isActive = true;
                         if ($pageKey === 'attendance' && in_array(($currentPage ?? ''), ['attendance', 'attendance_requests'], true)) $isActive = true;
                     ?>
                     <a href="<?php echo $pageKey; ?>" 

@@ -12,27 +12,46 @@ Security::initSecureSession();
 $error = '';
 $success = '';
 
-// Check if already logged in
-if (isset($_SESSION['employee_logged_in']) && $_SESSION['employee_logged_in'] === true) {
-    header("Location: employee_dashboard");
+if (isset($_GET['msg']) && $_GET['msg'] === 'timeout') {
+    $error = "Your session has timed out. Please sign in again.";
+}
+
+// Check if already logged in and redirect to proper dashboard based on role
+if (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true) {
+    header("Location: /admin/dashboard");
     exit();
+}
+if (isset($_SESSION['employee_logged_in']) && $_SESSION['employee_logged_in'] === true) {
+    $empRole = $_SESSION['role_slug'] ?? '';
+    $normRole = class_exists('Security') ? Security::normalizeRoleSlug($empRole) : $empRole;
+    if (in_array($normRole, ['admin', 'hr', 'manager', 'supervisor'], true) ||
+        in_array($empRole, ['super_admin', 'hr_manager', 'team_lead', 'supervisor', 'manager'], true)) {
+        header("Location: /admin/dashboard");
+        exit();
+    } else {
+        header("Location: employee_dashboard");
+        exit();
+    }
 }
 
 // Initialize rate limiting table
 Security::createRateLimitTable();
 
 // Process login form
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    // Verify CSRF token
-    if (!isset($_POST['csrf_token']) || !Security::validateCSRFToken($_POST['csrf_token'], 'login')) {
-        $error = "Invalid security token. Please refresh the page and try again.";
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+    // 1. Verify honeypot & bot detection challenge
+    if (!Security::verifyCaptcha()) {
+        $error = "Bot activity detected or security challenge failed. Please try again.";
+        Security::recordFailedLogin();
+    } elseif (!isset($_POST['csrf_token']) || !Security::validateCSRFToken($_POST['csrf_token'], 'login')) {
+        $error = "Invalid or expired security token. Please refresh the page and try again.";
     } else {
-        $employee_email = trim($_POST['email']);
-        $employee_password = trim($_POST['password']);
+        $identity = trim($_POST['identity'] ?? $_POST['email'] ?? $_POST['username'] ?? '');
+        $password = trim($_POST['password'] ?? '');
 
         // Validate input
-        if (empty($employee_email) || empty($employee_password)) {
-            $error = "Please enter both email and password.";
+        if (empty($identity) || empty($password)) {
+            $error = "Please enter your username, email, or employee ID and password.";
         } else {
             // Check rate limiting
             $rateLimit = Security::checkLoginRateLimit();
@@ -41,34 +60,149 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 Security::recordFailedLogin();
             } else {
                 try {
-                    // Prepare and execute query
-                    $stmt = $pdo->prepare("SELECT id, employee_id, first_name, last_name, email, password, status FROM employees WHERE email = ?");
-                    $stmt->execute([$employee_email]);
-                    $employee = $stmt->fetch(PDO::FETCH_ASSOC);
+                    // 1. Check if identity belongs to an Admin account
+                    $stmtAdmin = $pdo->prepare("SELECT id, username, email, password FROM admin WHERE username = ? OR email = ? LIMIT 1");
+                    $stmtAdmin->execute([$identity, $identity]);
+                    $admin = $stmtAdmin->fetch(PDO::FETCH_ASSOC);
 
-                    if ($employee && password_verify($employee_password, $employee['password'])) {
+                    if ($admin && password_verify($password, $admin['password'])) {
+                        // Clear failed login attempts on success
+                        Security::clearFailedLogins();
+
+                        // Regenerate session ID to prevent fixation
+                        Security::regenerateSession();
+
+                        // Look up role for this admin in admin_roles
+                        $rStmt = $pdo->prepare("SELECT r.id, r.slug, r.name FROM admin_roles ar 
+                            JOIN roles r ON ar.role_id = r.id 
+                            WHERE ar.admin_id = ? LIMIT 1");
+                        $rStmt->execute([(int)$admin['id']]);
+                        $adminRole = $rStmt->fetch(PDO::FETCH_ASSOC);
+
+                        $roleId   = $adminRole ? (int)$adminRole['id'] : 1;
+                        $roleSlug = $adminRole ? $adminRole['slug'] : 'super_admin';
+                        $roleName = $adminRole ? $adminRole['name'] : 'Super Administrator';
+
+                        $_SESSION['admin_logged_in'] = true;
+                        $_SESSION['admin_id'] = (int)$admin['id'];
+                        $_SESSION['admin_username'] = $admin['username'];
+                        $_SESSION['admin_email'] = $admin['email'] ?? '';
+                        $_SESSION['role_id'] = $roleId;
+                        $_SESSION['role_slug'] = $roleSlug;
+                        $_SESSION['role_name'] = $roleName;
+                        $_SESSION['user_type'] = 'admin';
+                        $_SESSION['login_time'] = time();
+
+                        // Link or auto-create corresponding employee profile for admin attendance & portal features
+                        $admEmail = $admin['email'] ?? ($admin['username'] . '@cloudaspire.test');
+                        $stEmpAdmin = $pdo->prepare("SELECT id, employee_id, first_name, last_name FROM employees WHERE email = ? OR employee_id = 'EMP-ADM-001' LIMIT 1");
+                        $stEmpAdmin->execute([$admEmail]);
+                        $linkedEmp = $stEmpAdmin->fetch(PDO::FETCH_ASSOC);
+
+                        if (!$linkedEmp) {
+                            try {
+                                $insEmp = $pdo->prepare("INSERT INTO employees
+                                    (employee_id, first_name, last_name, email, password, role_id, department, position, status, work_mode)
+                                    VALUES ('EMP-ADM-001', 'System', 'Administrator', ?, ?, 1, 'Executive', 'Super Administrator', 'active', 'on_site')");
+                                $insEmp->execute([$admEmail, $admin['password']]);
+                                $linkedEmpId = (int)$pdo->lastInsertId();
+                                $linkedEmpCode = 'EMP-ADM-001';
+                                $linkedEmpName = 'System Administrator';
+                            } catch (PDOException $e) {
+                                $linkedEmpId = (int)$admin['id'];
+                                $linkedEmpCode = 'EMP-ADM-001';
+                                $linkedEmpName = $admin['username'];
+                            }
+                        } else {
+                            $linkedEmpId = (int)$linkedEmp['id'];
+                            $linkedEmpCode = $linkedEmp['employee_id'];
+                            $linkedEmpName = trim($linkedEmp['first_name'] . ' ' . $linkedEmp['last_name']) ?: 'System Administrator';
+                        }
+
+                        $_SESSION['employee_logged_in'] = true;
+                        $_SESSION['employee_id'] = $linkedEmpId;
+                        $_SESSION['employee_code'] = $linkedEmpCode;
+                        $_SESSION['employee_name'] = $linkedEmpName;
+                        $_SESSION['employee_email'] = $admEmail;
+
+                        Security::logAudit((int)$admin['id'], 'admin_login_success', 'admin', (int)$admin['id'], [
+                            'username' => $admin['username'],
+                            'role' => $roleSlug,
+                            'ip' => Security::getClientIp()
+                        ]);
+
+                        if (!empty($_POST['remember_me'])) {
+                            setcookie('user_remember', $admin['username'], time() + (30 * 86400), '/', '', false, true);
+                        } else {
+                            if (isset($_COOKIE['user_remember'])) {
+                                setcookie('user_remember', '', time() - 3600, '/');
+                            }
+                        }
+
+                        // Send Login Alert Email safely (fail-fast)
+                        try {
+                            $mailer = new Mailer($pdo);
+                            $mailer->sendAdminLoginAlert(
+                                $admin['email'] ?? '',
+                                $_SESSION['admin_username'],
+                                $_SERVER['REMOTE_ADDR'] ?? '',
+                                $_SERVER['HTTP_USER_AGENT'] ?? ''
+                            );
+                        } catch (Throwable $mailEx) {
+                            error_log("Admin login alert email failed: " . $mailEx->getMessage());
+                        }
+
+                        header("Location: /admin/dashboard");
+                        exit();
+                    }
+
+                    // 2. Check if identity belongs to an Employee account
+                    $stmtEmp = $pdo->prepare("SELECT e.*, r.id AS role_table_id, r.slug AS role_slug, r.name AS role_name 
+                        FROM employees e 
+                        LEFT JOIN roles r ON e.role_id = r.id 
+                        WHERE e.email = ? OR e.employee_id = ? 
+                        LIMIT 1");
+                    $stmtEmp->execute([$identity, $identity]);
+                    $employee = $stmtEmp->fetch(PDO::FETCH_ASSOC);
+
+                    if ($employee && password_verify($password, $employee['password'])) {
                         if ($employee['status'] !== 'active') {
                             $error = "Your account is not active. Please contact the administrator.";
                         } else {
-                            // Clear failed login attempts on success
                             Security::clearFailedLogins();
-
-                            // Regenerate session ID to prevent fixation
                             Security::regenerateSession();
 
-                            // Set session data
+                            $empRoleSlug = !empty($employee['role_slug']) ? $employee['role_slug'] : 'employee';
+                            $empRoleName = !empty($employee['role_name']) ? $employee['role_name'] : 'Employee';
+                            $empRoleId   = !empty($employee['role_id']) ? (int)$employee['role_id'] : null;
+
                             $_SESSION['employee_logged_in'] = true;
-                            $_SESSION['employee_id'] = $employee['id'];
+                            $_SESSION['employee_id'] = (int)$employee['id'];
                             $_SESSION['employee_code'] = !empty($employee['employee_id']) 
                                 ? trim($employee['employee_id']) 
                                 : ('EMP-' . str_pad($employee['id'], 3, '0', STR_PAD_LEFT));
-                            $_SESSION['employee_name'] = $employee['first_name'] . ' ' . $employee['last_name'];
+                            $_SESSION['employee_name'] = trim($employee['first_name'] . ' ' . $employee['last_name']);
                             $_SESSION['employee_email'] = $employee['email'];
+                            $_SESSION['role_id'] = $empRoleId;
+                            $_SESSION['role_slug'] = $empRoleSlug;
+                            $_SESSION['role_name'] = $empRoleName;
+                            $_SESSION['user_type'] = 'employee';
                             $_SESSION['login_time'] = time();
 
-                            Security::logAudit(null, 'employee_login_success', 'employees', (int)$employee['id'], ['email' => $employee['email'], 'ip' => Security::getClientIp()]);
+                            Security::logAudit(null, 'employee_login_success', 'employees', (int)$employee['id'], [
+                                'email' => $employee['email'],
+                                'role' => $empRoleSlug,
+                                'ip' => Security::getClientIp()
+                            ]);
 
-                            // Send Login Alert Email safely (fail-fast without blocking user login)
+                            if (!empty($_POST['remember_me'])) {
+                                setcookie('user_remember', $employee['email'], time() + (30 * 86400), '/', '', false, true);
+                            } else {
+                                if (isset($_COOKIE['user_remember'])) {
+                                    setcookie('user_remember', '', time() - 3600, '/');
+                                }
+                            }
+
                             try {
                                 $mailer = new Mailer($pdo);
                                 $mailer->sendEmployeeLoginAlert(
@@ -81,18 +215,34 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                                 error_log("Employee login alert email failed: " . $mailEx->getMessage());
                             }
 
-                            // Redirect to employee dashboard
-                            header("Location: employee_dashboard");
-                            exit();
+                            // Role-Based Redirection:
+                            // Administrative roles access Admin Dashboard with admin privileges
+                            $normRoleSlug = Security::normalizeRoleSlug($empRoleSlug);
+                            if (in_array($normRoleSlug, ['admin', 'hr', 'manager', 'supervisor'], true) ||
+                                in_array($empRoleSlug, ['super_admin', 'hr_manager', 'team_lead', 'supervisor', 'manager'], true)) {
+                                $_SESSION['admin_logged_in'] = true;
+                                $_SESSION['admin_id'] = (int)$employee['id'];
+                                $_SESSION['admin_username'] = $_SESSION['employee_name'];
+                                $_SESSION['admin_email'] = $employee['email'];
+                                header("Location: /admin/dashboard");
+                                exit();
+                            } else {
+                                // Standard employee / staff / member routes to Employee Dashboard
+                                header("Location: employee_dashboard");
+                                exit();
+                            }
                         }
                     } else {
-                        $error = "Invalid email or password.";
+                        $error = "Invalid credentials. Please verify your username, email, or employee ID and password.";
                         Security::recordFailedLogin();
-                        Security::logAudit(null, 'employee_login_failed', 'employees', null, ['email' => $employee_email, 'ip' => Security::getClientIp()]);
+                        Security::logAudit(null, 'login_failed', 'users', null, [
+                            'identity' => $identity,
+                            'ip' => Security::getClientIp()
+                        ]);
                     }
                 } catch (PDOException $e) {
                     error_log("Login error: " . $e->getMessage());
-                    $error = "An error occurred. Please try again later.";
+                    $error = "An error occurred during authentication. Please try again later.";
                 }
             }
         }
@@ -131,8 +281,8 @@ if (!$siteFavicon && file_exists(__DIR__ . '/assets/uploads/site/favicon-b9f474f
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>Employee Login &bull; <?php echo htmlspecialchars($siteName); ?> Portal</title>
-    <meta name="description" content="Secure Employee Portal Login for Cloud Aspire team members.">
+    <title>Unified Login &bull; <?php echo htmlspecialchars($siteName); ?> Portal</title>
+    <meta name="description" content="Secure Role-Based Portal Login for Cloud Aspire administrators and team members.">
     <?php if ($siteFavicon): ?>
         <link rel="icon" type="image/png" href="<?php echo htmlspecialchars($siteFavicon); ?>">
     <?php else: ?>
@@ -883,7 +1033,7 @@ if (!$siteFavicon && file_exists(__DIR__ . '/assets/uploads/site/favicon-b9f474f
                 
                 <div class="portal-badge">
                     <span class="pulse-dot"></span>
-                    <span>Employee Operations Hub</span>
+                    <span>Unified Workspace Portal</span>
                 </div>
             </div>
 
@@ -892,7 +1042,7 @@ if (!$siteFavicon && file_exists(__DIR__ . '/assets/uploads/site/favicon-b9f474f
                 <div class="alert-banner alert-error" role="alert">
                     <i class="fas fa-circle-exclamation"></i>
                     <div>
-                        <strong>Authentication Error</strong>
+                        <strong><?php echo ($error === 'Employee Portal is currently disabled.') ? 'Access Restricted' : 'Authentication Error'; ?></strong>
                         <div><?php echo Security::sanitize($error); ?></div>
                     </div>
                 </div>
@@ -912,23 +1062,31 @@ if (!$siteFavicon && file_exists(__DIR__ . '/assets/uploads/site/favicon-b9f474f
             <!-- Authentication Form -->
             <form method="POST" action="" id="loginForm" novalidate>
                 <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrfToken); ?>">
+                <!-- Anti-bot honeypot field -->
+                <div style="position: absolute; left: -9999px; top: -9999px; opacity: 0; pointer-events: none;" aria-hidden="true">
+                    <input type="text" name="website_hp" tabindex="-1" autocomplete="off" value="">
+                </div>
+                <?php $captchaSiteKey = $_ENV['CAPTCHA_SITE_KEY'] ?? getenv('CAPTCHA_SITE_KEY') ?: ''; if (!empty($captchaSiteKey)): ?>
+                    <div class="cf-turnstile" data-sitekey="<?php echo htmlspecialchars($captchaSiteKey); ?>" style="margin-bottom: 16px;"></div>
+                    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+                <?php endif; ?>
 
-                <!-- Email Input -->
+                <!-- Identity Input (Username, Email, or Employee ID) -->
                 <div class="form-group">
-                    <label for="email" class="form-label">
-                        <span>Work Email</span>
+                    <label for="identity" class="form-label">
+                        <span>Username, Email or Employee ID</span>
                     </label>
                     <div class="input-control-wrap">
-                        <i class="fas fa-envelope input-icon-left"></i>
-                        <input type="email" 
-                               id="email" 
-                               name="email" 
+                        <i class="fas fa-user-shield input-icon-left"></i>
+                        <input type="text" 
+                               id="identity" 
+                               name="identity" 
                                class="form-input" 
-                               placeholder="you@cloudaspire.in" 
+                               placeholder="Enter username, email or employee ID" 
                                required 
                                autofocus 
-                               autocomplete="email"
-                               value="<?php echo isset($_POST['email']) ? htmlspecialchars($_POST['email']) : ''; ?>">
+                               autocomplete="username"
+                               value="<?php echo isset($_POST['identity']) ? htmlspecialchars($_POST['identity']) : (isset($_POST['email']) ? htmlspecialchars($_POST['email']) : (isset($_COOKIE['user_remember']) ? htmlspecialchars($_COOKIE['user_remember']) : '')); ?>">
                     </div>
                 </div>
 

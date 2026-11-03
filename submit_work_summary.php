@@ -18,6 +18,7 @@ require_once __DIR__ . '/app/AttendanceHelper.php';
 date_default_timezone_set('Asia/Kolkata');
 Security::init($pdo);
 Security::initSecureSession();
+Security::handleCORS();
 
 $plainToken = trim($_GET['token'] ?? ($_POST['token'] ?? ''));
 $errorMessage = null;
@@ -47,7 +48,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $submittedToken = trim($_POST['token'] ?? '');
     $csrfToken = $_POST['csrf_token'] ?? '';
 
-    if (!Security::validateCSRFToken($csrfToken, 'submit_daily_summary')) {
+    // Enforce rate limiting on summary submissions (20 attempts / 60 seconds per IP)
+    $rateLimit = Security::checkRateLimit('work_summary_submit', Security::getClientIp(), 20, 60);
+    if (!$rateLimit['allowed']) {
+        $errorMessage = $rateLimit['message'];
+        $tokenValidation = ['valid' => false, 'error' => $rateLimit['message']];
+    } elseif (!Security::validateCSRFToken($csrfToken, 'submit_daily_summary')) {
         $errorMessage = "Security session expired. Please refresh the page and try again.";
     } elseif (empty($submittedToken)) {
         $errorMessage = "Authentication token is missing. Please open the link sent to your email.";

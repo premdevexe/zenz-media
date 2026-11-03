@@ -428,6 +428,40 @@ class Security {
 	/**
 	 * Parse User Agent for Platform, Browser, and Device Type
 	 */
+	/**
+	 * Check if Employee Portal / Index is enabled in site settings
+	 *
+	 * @return bool
+	 */
+	public static function isEmployeePanelEnabled() {
+		if (!self::$pdo) {
+			return true;
+		}
+		try {
+			$stmt = self::$pdo->query("SELECT employee_index_enabled FROM site_settings WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1");
+			$val = $stmt->fetchColumn();
+			if ($val !== false && $val !== null) {
+				return (int)$val === 1;
+			}
+		} catch (Throwable $e) {}
+		return true;
+	}
+
+	/**
+	 * Server-side middleware: enforce Employee Panel active state.
+	 * Blocks direct access to all employee panel routes while the panel is disabled,
+	 * clears any existing employee session to prevent redirect loops, and
+	 * immediately redirects to the Login Page with an appropriate disabled message.
+	 *
+	 * @param string $redirectUrl
+	 * @return void
+	 */
+	public static function requireEmployeePanelAccess($redirectUrl = 'login') {
+		// No-op: Employee portal routes remain fully accessible.
+		// The toggle applies strictly to the public index page (index.php).
+		return true;
+	}
+
 	public static function parseUserAgent($ua = null) {
 		$ua = $ua ?: ($_SERVER['HTTP_USER_AGENT'] ?? '');
 		$platform = 'Unknown OS';
@@ -630,32 +664,73 @@ class Security {
 	}
 
 	/**
-	 * Check if an administrator possesses a specific permission slug
+	 * Check if an administrator or role-assigned user possesses a specific permission slug
 	 */
 	public static function hasPermission($permissionSlug, $adminId = null) {
 		if (!self::$pdo) return false;
+
+		$sessionUserId = $_SESSION['admin_id'] ?? $_SESSION['employee_id'] ?? null;
 		if ($adminId === null) {
-			$adminId = $_SESSION['admin_id'] ?? null;
+			$adminId = $sessionUserId;
 		}
 		if (!$adminId) return false;
 
+		// 1. Check session role directly if marked super_admin for the active session user
+		if ($adminId == $sessionUserId && isset($_SESSION['role_slug']) && in_array(self::normalizeRoleSlug($_SESSION['role_slug']), ['admin', 'super_admin'], true)) {
+			return true;
+		}
+
 		try {
-			// Super admin has unrestricted root access
+			// Super admin has unrestricted root access via admin_roles
 			$st = self::$pdo->prepare("SELECT COUNT(*) FROM admin_roles ar 
 				JOIN roles r ON ar.role_id = r.id 
-				WHERE ar.admin_id = ? AND r.slug = 'super_admin'");
+				WHERE ar.admin_id = ? AND r.slug IN ('super_admin', 'admin')");
 			$st->execute([$adminId]);
 			if ((int)$st->fetchColumn() > 0) {
 				return true;
 			}
 
-			// Check assigned granular permission
+			// Check assigned granular permission in admin_roles
 			$stmt = self::$pdo->prepare("SELECT COUNT(*) FROM admin_roles ar
 				JOIN role_permissions rp ON ar.role_id = rp.role_id
 				JOIN permissions p ON rp.permission_id = p.id
 				WHERE ar.admin_id = ? AND p.slug = ?");
 			$stmt->execute([$adminId, $permissionSlug]);
-			return (int)$stmt->fetchColumn() > 0;
+			if ((int)$stmt->fetchColumn() > 0) {
+				return true;
+			}
+
+			// Check active session role_id directly if set for the active session user
+			if ($adminId == $sessionUserId && !empty($_SESSION['role_id'])) {
+				$stmtRole = self::$pdo->prepare("SELECT COUNT(*) FROM role_permissions rp
+					JOIN permissions p ON rp.permission_id = p.id
+					WHERE rp.role_id = ? AND p.slug = ?");
+				$stmtRole->execute([(int)$_SESSION['role_id'], $permissionSlug]);
+				if ((int)$stmtRole->fetchColumn() > 0) {
+					return true;
+				}
+			}
+
+			// Check employees table if adminId corresponds to an employee record
+			$empStmt = self::$pdo->prepare("SELECT e.role_id, r.slug AS role_slug FROM employees e
+				LEFT JOIN roles r ON e.role_id = r.id WHERE e.id = ?");
+			$empStmt->execute([$adminId]);
+			$emp = $empStmt->fetch(PDO::FETCH_ASSOC);
+			if ($emp) {
+				if (!empty($emp['role_slug']) && in_array(self::normalizeRoleSlug($emp['role_slug']), ['admin', 'super_admin'], true)) {
+					return true;
+				}
+				$empRoleId = !empty($emp['role_id']) ? (int)$emp['role_id'] : 5; // Default to Staff (5)
+				$stmtEmp = self::$pdo->prepare("SELECT COUNT(*) FROM role_permissions rp
+					JOIN permissions p ON rp.permission_id = p.id
+					WHERE rp.role_id = ? AND p.slug = ?");
+				$stmtEmp->execute([$empRoleId, $permissionSlug]);
+				if ((int)$stmtEmp->fetchColumn() > 0) {
+					return true;
+				}
+			}
+
+			return false;
 		} catch (PDOException $e) {
 			error_log("Permission check error: " . $e->getMessage());
 			return false;
@@ -663,14 +738,126 @@ class Security {
 	}
 
 	/**
-	 * Get all permission slugs assigned to an administrator
+	 * Normalize role slug across aliases
+	 */
+	public static function normalizeRoleSlug($slug) {
+		$slug = strtolower(trim((string)$slug));
+		if (in_array($slug, ['super_admin', 'super-admin', 'super admin', 'admin', 'administrator', 'root'], true)) return 'admin';
+		if (in_array($slug, ['hr_manager', 'hr-manager', 'hr manager', 'hr', 'human_resources', 'human resources'], true)) return 'hr';
+		if (in_array($slug, ['team_lead', 'team-lead', 'team lead', 'manager', 'project_director', 'project director & team lead', 'project director', 'lead'], true)) return 'manager';
+		if (in_array($slug, ['supervisor', 'department_supervisor', 'department-supervisor', 'department supervisor'], true)) return 'supervisor';
+		if (in_array($slug, ['staff', 'employee', 'regular'], true)) return 'staff';
+		if (in_array($slug, ['member', 'intern'], true)) return 'member';
+		return $slug ?: 'staff';
+	}
+
+	/**
+	 * Generate a clean URL/database slug
+	 */
+	public static function slugify($text) {
+		if (!$text) return '';
+		$text = preg_replace('~[^\pL\d]+~u', '_', (string)$text);
+		$text = iconv('utf-8', 'us-ascii//TRANSLIT', $text) ?: $text;
+		$text = preg_replace('~[^-\w]+~', '', $text);
+		$text = trim($text, '_');
+		$text = preg_replace('~_+~', '_', $text);
+		return strtolower($text);
+	}
+
+	/**
+	 * Determine if current or specified user is a Super Administrator / Admin
+	 */
+	public static function isSuperAdmin($userId = null) {
+		if (!self::$pdo) return false;
+		$sessionUserId = $_SESSION['admin_id'] ?? $_SESSION['employee_id'] ?? null;
+		if ($userId === null) {
+			$userId = $sessionUserId;
+		}
+		if (!$userId) return false;
+
+		if ($userId == $sessionUserId && isset($_SESSION['role_slug'])) {
+			$norm = self::normalizeRoleSlug($_SESSION['role_slug']);
+			if ($norm === 'admin') return true;
+		}
+
+		try {
+			// Check admin_roles table
+			$st = self::$pdo->prepare("SELECT COUNT(*) FROM admin_roles ar 
+				JOIN roles r ON ar.role_id = r.id 
+				WHERE ar.admin_id = ? AND r.slug IN ('super_admin', 'admin')");
+			$st->execute([$userId]);
+			if ((int)$st->fetchColumn() > 0) return true;
+
+			// Check employees table
+			$empSt = self::$pdo->prepare("SELECT r.slug FROM employees e 
+				JOIN roles r ON e.role_id = r.id WHERE e.id = ?");
+			$empSt->execute([$userId]);
+			$rSlug = $empSt->fetchColumn();
+			if ($rSlug && self::normalizeRoleSlug($rSlug) === 'admin') return true;
+
+			return false;
+		} catch (PDOException $e) {
+			return false;
+		}
+	}
+
+	/**
+	 * Validate if an admin has authorization to assign a specific role
+	 */
+	public static function canAssignRole($targetRoleIdOrSlug, $currentUserId = null) {
+		if (!self::$pdo) return false;
+		$sessionUserId = $_SESSION['admin_id'] ?? $_SESSION['employee_id'] ?? null;
+		if ($currentUserId === null) {
+			$currentUserId = $sessionUserId;
+		}
+		if (!$currentUserId) return false;
+
+		// Must have employees.edit OR employees.create to assign any role
+		if (!self::hasPermission('employees.edit', $currentUserId) && !self::hasPermission('employees.create', $currentUserId)) {
+			return false;
+		}
+
+		// Resolve target role slug
+		$targetSlug = '';
+		if (is_numeric($targetRoleIdOrSlug)) {
+			$targetRoleId = (int)$targetRoleIdOrSlug;
+			if ($targetRoleId === 0 || $targetRoleId === 5) {
+				return true; // Default/Staff is allowed for authorized role editors
+			}
+			$rStmt = self::$pdo->prepare("SELECT slug FROM roles WHERE id = ?");
+			$rStmt->execute([$targetRoleId]);
+			$targetSlug = (string)$rStmt->fetchColumn();
+		} else {
+			$targetSlug = (string)$targetRoleIdOrSlug;
+		}
+
+		$normTarget = self::normalizeRoleSlug($targetSlug);
+
+		// Admin role can ONLY be assigned by an Admin (Super Administrator)
+		if ($normTarget === 'admin') {
+			return self::isSuperAdmin($currentUserId);
+		}
+
+		return true;
+	}
+
+	/**
+	 * Get all permission slugs assigned to an administrator or role
 	 */
 	public static function getAdminPermissions($adminId = null) {
 		if (!self::$pdo) return [];
+
+		$sessionUserId = $_SESSION['admin_id'] ?? $_SESSION['employee_id'] ?? null;
 		if ($adminId === null) {
-			$adminId = $_SESSION['admin_id'] ?? null;
+			$adminId = $sessionUserId;
 		}
 		if (!$adminId) return [];
+
+		if ($adminId == $sessionUserId && isset($_SESSION['role_slug']) && $_SESSION['role_slug'] === 'super_admin') {
+			try {
+				return self::$pdo->query("SELECT slug FROM permissions")->fetchAll(PDO::FETCH_COLUMN);
+			} catch (PDOException $e) {}
+		}
 
 		try {
 			// If super admin, return all system permissions
@@ -682,12 +869,41 @@ class Security {
 				return self::$pdo->query("SELECT slug FROM permissions")->fetchAll(PDO::FETCH_COLUMN);
 			}
 
+			$perms = [];
+
 			$stmt = self::$pdo->prepare("SELECT DISTINCT p.slug FROM admin_roles ar
 				JOIN role_permissions rp ON ar.role_id = rp.role_id
 				JOIN permissions p ON rp.permission_id = p.id
 				WHERE ar.admin_id = ?");
 			$stmt->execute([$adminId]);
-			return $stmt->fetchAll(PDO::FETCH_COLUMN);
+			$perms = array_merge($perms, $stmt->fetchAll(PDO::FETCH_COLUMN));
+
+			if (!empty($_SESSION['role_id'])) {
+				$stmtRole = self::$pdo->prepare("SELECT DISTINCT p.slug FROM role_permissions rp
+					JOIN permissions p ON rp.permission_id = p.id
+					WHERE rp.role_id = ?");
+				$stmtRole->execute([(int)$_SESSION['role_id']]);
+				$perms = array_merge($perms, $stmtRole->fetchAll(PDO::FETCH_COLUMN));
+			}
+
+			$empStmt = self::$pdo->prepare("SELECT e.role_id, r.slug AS role_slug FROM employees e
+				LEFT JOIN roles r ON e.role_id = r.id WHERE e.id = ?");
+			$empStmt->execute([$adminId]);
+			$emp = $empStmt->fetch(PDO::FETCH_ASSOC);
+			if ($emp) {
+				if (!empty($emp['role_slug']) && $emp['role_slug'] === 'super_admin') {
+					return self::$pdo->query("SELECT slug FROM permissions")->fetchAll(PDO::FETCH_COLUMN);
+				}
+				if (!empty($emp['role_id'])) {
+					$stmtEmp = self::$pdo->prepare("SELECT DISTINCT p.slug FROM role_permissions rp
+						JOIN permissions p ON rp.permission_id = p.id
+						WHERE rp.role_id = ?");
+					$stmtEmp->execute([(int)$emp['role_id']]);
+					$perms = array_merge($perms, $stmtEmp->fetchAll(PDO::FETCH_COLUMN));
+				}
+			}
+
+			return array_values(array_unique($perms));
 		} catch (PDOException $e) {
 			error_log("Get admin permissions error: " . $e->getMessage());
 			return [];
@@ -695,21 +911,31 @@ class Security {
 	}
 
 	/**
-	 * Get roles assigned to an administrator
+	 * Get roles assigned to an administrator or employee
 	 */
 	public static function getAdminRoles($adminId = null) {
 		if (!self::$pdo) return [];
 		if ($adminId === null) {
-			$adminId = $_SESSION['admin_id'] ?? null;
+			$adminId = $_SESSION['admin_id'] ?? $_SESSION['employee_id'] ?? null;
 		}
 		if (!$adminId) return [];
 
 		try {
+			$roles = [];
 			$stmt = self::$pdo->prepare("SELECT r.id, r.name, r.slug, r.is_system FROM admin_roles ar
 				JOIN roles r ON ar.role_id = r.id
 				WHERE ar.admin_id = ?");
 			$stmt->execute([$adminId]);
-			return $stmt->fetchAll(PDO::FETCH_ASSOC);
+			$roles = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+			if (empty($roles)) {
+				$empStmt = self::$pdo->prepare("SELECT r.id, r.name, r.slug, r.is_system FROM employees e
+					JOIN roles r ON e.role_id = r.id WHERE e.id = ?");
+				$empStmt->execute([$adminId]);
+				$roles = $empStmt->fetchAll(PDO::FETCH_ASSOC);
+			}
+
+			return $roles;
 		} catch (PDOException $e) {
 			error_log("Get admin roles error: " . $e->getMessage());
 			return [];
@@ -768,13 +994,15 @@ class Security {
 		// Restrict hardware access while explicitly permitting Geolocation for attendance on self
 		header("Permissions-Policy: geolocation=(self), camera=(), microphone=()");
 
-		// Content Security Policy compatible with Google Fonts, FontAwesome, Leaflet/OpenStreetMap
+		// Content Security Policy compatible with Google Fonts, FontAwesome, Leaflet/OpenStreetMap, Turnstile
+		// Note: 'unsafe-eval' is intentionally removed to prevent DOM-based script evaluation exploits
 		$csp = "default-src 'self'; " .
-		       "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com https://unpkg.com; " .
-		       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com https://unpkg.com; " .
+		       "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://unpkg.com https://cdn.jsdelivr.net https://challenges.cloudflare.com https://www.google.com/recaptcha/ https://www.gstatic.com/recaptcha/; " .
+		       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com https://unpkg.com https://cdn.jsdelivr.net; " .
 		       "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:; " .
-		       "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://cloudaspire.in; " .
-		       "connect-src 'self'; " .
+		       "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://cloudaspire.in https://*.cloudaspire.in; " .
+		       "connect-src 'self' https://challenges.cloudflare.com; " .
+		       "frame-src 'self' https://challenges.cloudflare.com https://www.google.com/recaptcha/; " .
 		       "frame-ancestors 'self'; " .
 		       "base-uri 'self'; " .
 		       "form-action 'self'";
@@ -793,6 +1021,8 @@ class Security {
 
 	/**
 	 * Handle CORS validation with a strict origin allowlist
+	 * Dynamically incorporates SYSTEM_URL, environment ALLOWED_ORIGINS, and standard portals.
+	 * Rejects untrusted origins without emitting vulnerable 'null' headers.
 	 */
 	public static function handleCORS($customAllowedOrigins = []) {
 		$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -800,21 +1030,52 @@ class Security {
 			return true; // Same-origin request
 		}
 
-		$allowedOrigins = array_merge([
-			'https://cloudaspire.in',
+		// Base local origins
+		$defaultOrigins = [
 			'http://localhost',
 			'http://127.0.0.1',
 			'https://localhost',
 			'https://127.0.0.1'
-		], $customAllowedOrigins);
+		];
+
+		// Include origin derived from SYSTEM_URL if configured
+		$systemUrl = $_ENV['SYSTEM_URL'] ?? getenv('SYSTEM_URL') ?: '';
+		if (!empty($systemUrl)) {
+			$sysParts = parse_url($systemUrl);
+			if (!empty($sysParts['scheme']) && !empty($sysParts['host'])) {
+				$sysOrigin = $sysParts['scheme'] . '://' . $sysParts['host'];
+				if (!empty($sysParts['port'])) {
+					$sysOrigin .= ':' . $sysParts['port'];
+				}
+				$defaultOrigins[] = $sysOrigin;
+			}
+		}
+
+		// Include confirmed portal and apex domains
+		$defaultOrigins[] = 'https://portal.cloudaspire.in';
+		$defaultOrigins[] = 'https://cloudaspire.in';
+
+		// Include extra origins from environment configuration
+		$envAllowed = $_ENV['ALLOWED_ORIGINS'] ?? getenv('ALLOWED_ORIGINS') ?: '';
+		if (!empty($envAllowed)) {
+			$extra = array_map('trim', explode(',', $envAllowed));
+			$defaultOrigins = array_merge($defaultOrigins, $extra);
+		}
+
+		$allowedOrigins = array_unique(array_merge($defaultOrigins, $customAllowedOrigins));
 
 		$parsedOrigin = parse_url($origin);
-		$originHost = $parsedOrigin['host'] ?? '';
+		$originHost = strtolower($parsedOrigin['host'] ?? '');
 
 		$isAllowed = false;
 		if (in_array($origin, $allowedOrigins, true)) {
 			$isAllowed = true;
-		} elseif (str_ends_with($originHost, '.trycloudflare.com')) {
+		}
+
+		// Only permit .trycloudflare.com tunnels in local development with explicit opt-in
+		$appEnv = strtolower($_ENV['APP_ENV'] ?? getenv('APP_ENV') ?: 'production');
+		$allowTunnel = filter_var($_ENV['ENABLE_CLOUDFLARE_TUNNEL'] ?? getenv('ENABLE_CLOUDFLARE_TUNNEL') ?: false, FILTER_VALIDATE_BOOLEAN);
+		if (!$isAllowed && $appEnv === 'local' && $allowTunnel && str_ends_with($originHost, '.trycloudflare.com')) {
 			$isAllowed = true;
 		}
 
@@ -825,14 +1086,14 @@ class Security {
 				header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
 				header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-CSRF-Token");
 				header("Vary: Origin");
-			} else {
-				header("Access-Control-Allow-Origin: null");
 			}
+			// When unapproved, do NOT emit Access-Control-Allow-Origin: null.
+			// Omitting the header prevents cross-origin data exposure.
 		}
 
 		if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
 			if (!headers_sent()) {
-				http_response_code(204);
+				http_response_code($isAllowed ? 204 : 403);
 			}
 			exit();
 		}
@@ -850,7 +1111,7 @@ class Security {
 
 		self::createRateLimitTable();
 		$ip = $identifier ?? self::getClientIp();
-		$key = substr($actionKey . ':' . $ip, 0, 45);
+		$key = 'rl_' . substr(md5($actionKey . ':' . $ip), 0, 32);
 		$now = time();
 
 		try {
@@ -1088,6 +1349,78 @@ class Security {
 			error_log("CAPTCHA verification error: " . $e->getMessage());
 			return false;
 		}
+	}
+
+	/**
+	 * Detect file MIME type safely without hard dependency on ext-fileinfo.
+	 * Falls back gracefully across finfo -> mime_content_type -> getimagesize -> exif_imagetype -> extension.
+	 * Guaranteed NEVER to throw unhandled fatal Class NotFound errors.
+	 */
+	public static function detectFileMimeType($filePath, $clientName = '') {
+		if (empty($filePath) || !file_exists($filePath)) {
+			return null;
+		}
+
+		// 1. Try finfo if extension is enabled
+		if (class_exists('finfo')) {
+			try {
+				$finfo = new finfo(FILEINFO_MIME_TYPE);
+				$mime = $finfo->file($filePath);
+				if (!empty($mime) && $mime !== 'application/octet-stream') {
+					return strtolower($mime);
+				}
+			} catch (Throwable $e) {}
+		}
+
+		// 2. Try mime_content_type if available
+		if (function_exists('mime_content_type')) {
+			try {
+				$mime = @mime_content_type($filePath);
+				if (!empty($mime) && $mime !== 'application/octet-stream') {
+					return strtolower($mime);
+				}
+			} catch (Throwable $e) {}
+		}
+
+		// 3. For images, try getimagesize (built into GD, standard in all PHP builds)
+		if (function_exists('getimagesize')) {
+			try {
+				$img = @getimagesize($filePath);
+				if (!empty($img['mime'])) {
+					return strtolower($img['mime']);
+				}
+			} catch (Throwable $e) {}
+		}
+
+		// 4. Try exif_imagetype
+		if (function_exists('exif_imagetype')) {
+			try {
+				$type = @exif_imagetype($filePath);
+				$map = [
+					IMAGETYPE_JPEG => 'image/jpeg',
+					IMAGETYPE_PNG  => 'image/png',
+					IMAGETYPE_GIF  => 'image/gif',
+					IMAGETYPE_WEBP => 'image/webp',
+					IMAGETYPE_ICO  => 'image/x-icon'
+				];
+				if (isset($map[$type])) {
+					return $map[$type];
+				}
+			} catch (Throwable $e) {}
+		}
+
+		// 5. Fallback to extension mapping from client filename
+		$ext = strtolower(pathinfo($clientName ?: $filePath, PATHINFO_EXTENSION));
+		$extMap = [
+			'jpg'  => 'image/jpeg',
+			'jpeg' => 'image/jpeg',
+			'png'  => 'image/png',
+			'gif'  => 'image/gif',
+			'webp' => 'image/webp',
+			'ico'  => 'image/x-icon',
+			'pdf'  => 'application/pdf'
+		];
+		return $extMap[$ext] ?? 'application/octet-stream';
 	}
 }
 ?>

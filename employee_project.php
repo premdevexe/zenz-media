@@ -22,6 +22,15 @@ if (!isset($_SESSION['employee_logged_in']) || $_SESSION['employee_logged_in'] !
 
 $employee_id   = (int)($_SESSION['employee_id'] ?? 0);
 $employee_name = $_SESSION['employee_name'] ?? 'Team Member';
+
+// Enforce role-based permission server-side (Member role does not have projects.view)
+if (!Security::hasPermission('projects.view', $employee_id)) {
+    $_SESSION['dash_notice'] = "Access Denied: Your assigned role does not possess permissions to access the Project Hub.";
+    $_SESSION['dash_notice_type'] = "error";
+    header("Location: employee_dashboard");
+    exit();
+}
+
 $message       = '';
 $messageType   = '';
 
@@ -1299,23 +1308,6 @@ $csrfToken = Security::generateCSRFToken('employee_project');
                 <div><?php echo htmlspecialchars($message); ?></div>
             </div>
         <?php endif; ?>
-
-        <!-- Hero Header -->
-        <section class="hero-banner">
-            <div>
-                <h1 class="hero-title">
-                    <i class="fas fa-folder-open"></i>
-                    My Projects
-                </h1>
-                <p class="hero-subtitle">
-                    Submit client deliverables, Google Drive repositories, and track supervisor review progress in real-time.
-                </p>
-            </div>
-            <button class="btn-submit-hero" onclick="openSubmitModal()">
-                <i class="fas fa-plus"></i>
-                Submit New Project
-            </button>
-        </section>
 
         <!-- KPI Metrics Grid -->
         <section class="kpi-grid">

@@ -23,11 +23,20 @@ if (!isset($_SESSION['employee_logged_in']) || $_SESSION['employee_logged_in'] !
 
 $employee_id   = (int)($_SESSION['employee_id'] ?? 0);
 $employee_name = $_SESSION['employee_name'] ?? 'Team Member';
+
+// Enforce role-based permission server-side (Member role does not have leaves.view)
+if (!Security::hasPermission('leaves.view', $employee_id)) {
+    $_SESSION['dash_notice'] = "Access Denied: Your assigned role does not possess permissions to access the Leave Management terminal.";
+    $_SESSION['dash_notice_type'] = "error";
+    header("Location: employee_dashboard");
+    exit();
+}
+
 $message       = '';
 $messageType   = '';
 
-// Supported Leave Types matching database enum('annual','sick','casual','early_departure')
-$leaveTypes = [
+// Supported Leave Types
+$allLeaveTypes = [
     'casual' => [
         'label' => 'Casual Leave',
         'desc'  => 'Short personal time off or family commitments',
@@ -52,6 +61,22 @@ $leaveTypes = [
         'bg'    => 'rgba(5, 150, 105, 0.1)',
         'border'=> 'rgba(5, 150, 105, 0.25)'
     ],
+    'maternity' => [
+        'label' => 'Maternity Leave',
+        'desc'  => 'Prenatal and postnatal leave for eligible female employees',
+        'icon'  => 'fa-person-breastfeeding',
+        'color' => '#db2777',
+        'bg'    => 'rgba(219, 39, 119, 0.1)',
+        'border'=> 'rgba(219, 39, 119, 0.25)'
+    ],
+    'paternity' => [
+        'label' => 'Paternity Leave',
+        'desc'  => 'Leave for eligible male employees upon childbirth or adoption',
+        'icon'  => 'fa-baby',
+        'color' => '#4f46e5',
+        'bg'    => 'rgba(79, 70, 229, 0.1)',
+        'border'=> 'rgba(79, 70, 229, 0.25)'
+    ],
     'early_departure' => [
         'label' => 'Early Departure / Half Day',
         'desc'  => 'Leaving shift early or arriving late for urgent appointments',
@@ -61,6 +86,23 @@ $leaveTypes = [
         'border'=> 'rgba(217, 119, 6, 0.25)'
     ]
 ];
+
+// Determine employee-eligible leave types dynamically
+$leaveTypes = [];
+foreach ($allLeaveTypes as $slug => $meta) {
+    $elig = LeaveHelper::checkEligibility($pdo, $employee_id, $slug);
+    if ($elig['eligible']) {
+        $leaveTypes[$slug] = $meta;
+    }
+}
+if (empty($leaveTypes)) {
+    $leaveTypes = [
+        'casual' => $allLeaveTypes['casual'],
+        'sick'   => $allLeaveTypes['sick'],
+        'annual' => $allLeaveTypes['annual'],
+        'early_departure' => $allLeaveTypes['early_departure'],
+    ];
+}
 
 // Status Lifecycle Configurations
 $statuses = [
@@ -103,8 +145,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $depTime   = trim($_POST['early_departure_time'] ?? '');
         $reason    = trim($_POST['reason'] ?? '');
 
-        if (!array_key_exists($leaveType, $leaveTypes)) {
-            $message     = 'Please select a valid leave classification.';
+        $elig = LeaveHelper::checkEligibility($pdo, $employee_id, $leaveType, $startDate);
+        if (!$elig['eligible']) {
+            $message     = $elig['message'];
             $messageType = 'error';
         } elseif (empty($startDate) || empty($endDate) || empty($reason)) {
             $message     = 'Please fill in all required date and reason fields.';
@@ -1026,23 +1069,6 @@ $csrfToken = Security::generateCSRFToken('employee_leave');
             </div>
         <?php endif; ?>
 
-        <!-- Hero Header -->
-        <section class="hero-banner">
-            <div>
-                <h1 class="hero-title">
-                    <i class="fas fa-calendar-xmark"></i>
-                    Leave Management
-                </h1>
-                <p class="hero-subtitle">
-                    Submit time-off requests, track supervisor approvals, and obtain official Leave Codes (LV Codes).
-                </p>
-            </div>
-            <button class="btn-submit-hero" onclick="openLeaveModal()">
-                <i class="fas fa-plus"></i>
-                Request Time Off
-            </button>
-        </section>
-
         <!-- KPI Metrics Grid -->
         <section class="kpi-grid">
             <div class="kpi-card kpi-indigo">
@@ -1139,7 +1165,7 @@ $csrfToken = Security::generateCSRFToken('employee_leave');
                 <?php foreach ($leaves as $leave): 
                     $lId      = (int)$leave['id'];
                     $typeKey  = $leave['leave_type'] ?? 'casual';
-                    $tCfg     = $leaveTypes[$typeKey] ?? $leaveTypes['casual'];
+                    $tCfg     = $allLeaveTypes[$typeKey] ?? $leaveTypes[$typeKey] ?? $allLeaveTypes['casual'];
                     $stKey    = $leave['status'] ?? 'pending';
                     $sCfg     = $statuses[$stKey] ?? $statuses['pending'];
 

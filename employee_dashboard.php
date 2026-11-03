@@ -164,27 +164,6 @@ try {
     error_log("Error fetching projects: " . $e->getMessage());
 }
 
-// Fetch Today's Attendance Record
-$todayAttendance = null;
-try {
-    $attendanceExist = $pdo->query("SHOW TABLES LIKE 'attendance'")->rowCount() > 0;
-    if ($attendanceExist) {
-        $stmt = $pdo->prepare("SELECT check_in, check_out, status, attendance_status FROM attendance WHERE employee_id = ? AND date = ?");
-        $stmt->execute([$employee_id, $todayDate]);
-        $todayAttendance = $stmt->fetch(PDO::FETCH_ASSOC);
-    }
-} catch (PDOException $e) {
-    error_log("Error fetching today's attendance: " . $e->getMessage());
-}
-
-// Evaluate automatic Attendance Portal closure status
-$portalClosure = null;
-try {
-    $portalClosure = AttendanceHelper::evaluatePortalClosureStatus($pdo, $employee_id);
-} catch (Exception $e) {
-    error_log("Portal closure check failed: " . $e->getMessage());
-}
-
 // Calculate Task Completion Rate
 $completionRate = ($totalTasks > 0) ? round(($completedTasks / $totalTasks) * 100) : 0;
 
@@ -945,47 +924,6 @@ if ($currentHour < 12) {
             font-weight: 700;
         }
 
-        /* ── Attendance Quick Banner ── */
-        .attendance-banner {
-            background: linear-gradient(135deg, rgba(79, 70, 229, 0.08), rgba(99, 102, 241, 0.04));
-            border: 1.5px dashed var(--db-brand-border);
-            border-radius: var(--db-radius-card);
-            padding: 22px 26px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 16px;
-        }
-        .attendance-info-left {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-        }
-        .attendance-icon-badge {
-            width: 46px;
-            height: 46px;
-            border-radius: 12px;
-            background: var(--db-brand);
-            color: #ffffff;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.3rem;
-            flex-shrink: 0;
-            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.3);
-        }
-        .attendance-title {
-            font-size: 1.05rem;
-            font-weight: 800;
-            color: var(--db-text);
-            margin-bottom: 2px;
-        }
-        .attendance-sub {
-            font-size: 0.88rem;
-            color: var(--db-muted);
-        }
-
         /* ── RESPONSIVE BREAKPOINTS ── */
         @media (max-width: 1080px) {
             .metrics-grid {
@@ -1049,14 +987,7 @@ if ($currentHour < 12) {
             .mobile-tasks-cards {
                 display: flex;
             }
-            .attendance-banner {
-                flex-direction: column;
-                align-items: flex-start;
             }
-            .attendance-banner .action-btn {
-                width: 100%;
-            }
-        }
 
         @media (max-width: 480px) {
             .dash-container {
@@ -1255,20 +1186,35 @@ if ($currentHour < 12) {
 
             <!-- Quick Action Buttons -->
             <div class="welcome-actions">
+                <?php if (Security::hasPermission('attendance.view', $employee_id)): ?>
                 <a href="employee_attendance" class="action-btn action-btn-primary" title="Record Attendance">
                     <i class="fas fa-clock icon-anim-spin"></i> Attendance
                 </a>
+                <?php endif; ?>
+                <?php if (Security::hasPermission('tasks.view', $employee_id)): ?>
                 <a href="employee_task" class="action-btn action-btn-outline" title="View Assigned Tasks">
                     <i class="fas fa-list-check icon-anim-bounce"></i> Tasks (<?php echo $pendingTasks; ?>)
                 </a>
+                <?php endif; ?>
+                <?php if (Security::hasPermission('projects.view', $employee_id)): ?>
                 <a href="employee_project" class="action-btn action-btn-outline" title="Submit Project">
                     <i class="fas fa-plus icon-anim-sparkle"></i> New Project
                 </a>
+                <?php endif; ?>
+                <?php if (Security::hasPermission('leaves.view', $employee_id)): ?>
                 <a href="employee_leave" class="action-btn action-btn-outline" title="Request Leave">
                     <i class="fas fa-plane-departure icon-anim-float"></i> Request Leave
                 </a>
+                <?php endif; ?>
             </div>
         </section>
+
+        <?php if (!empty($_SESSION['dash_notice'])): ?>
+            <div style="background:rgba(225,29,72,0.12); border:1px solid rgba(225,29,72,0.25); color:#e11d48; padding:12px 18px; border-radius:12px; margin-bottom:20px; display:flex; align-items:center; gap:10px; font-weight:600;">
+                <i class="fas fa-circle-exclamation"></i>
+                <span><?php echo htmlspecialchars($_SESSION['dash_notice']); unset($_SESSION['dash_notice'], $_SESSION['dash_notice_type']); ?></span>
+            </div>
+        <?php endif; ?>
 
         <!-- Main Dashboard Grid Layout -->
         <div class="dashboard-grid">
@@ -1396,65 +1342,6 @@ if ($currentHour < 12) {
                         <div class="metric-value"><?php echo $totalTasks; ?></div>
                         <div class="metric-caption">Lifetime Tasks Assigned</div>
                     </div>
-                </section>
-
-                <!-- Today's Attendance Quick Widget -->
-                <section class="attendance-banner" style="<?php echo ($portalClosure && $portalClosure['is_closed']) ? 'background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(220, 38, 38, 0.03)); border-color: rgba(239, 68, 68, 0.3);' : ''; ?>">
-                    <div class="attendance-info-left">
-                        <div class="attendance-icon-badge" style="<?php echo ($portalClosure && $portalClosure['is_closed']) ? 'background: #dc2626; box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3);' : ''; ?>">
-                            <?php if ($portalClosure && $portalClosure['is_closed']): ?>
-                                <i class="fas fa-lock"></i>
-                            <?php else: ?>
-                                <i class="fas fa-fingerprint icon-anim-pulse"></i>
-                            <?php endif; ?>
-                        </div>
-                        <div>
-                            <?php if ($portalClosure && $portalClosure['is_closed']): ?>
-                                <h3 class="attendance-title" style="color: #b91c1c;">Attendance Portal Closed</h3>
-                                <div class="attendance-sub">
-                                    <span style="color: #dc2626; font-weight: 600;">
-                                        <?php echo htmlspecialchars($portalClosure['message']); ?>
-                                    </span>
-                                    <?php if (!empty($todayAttendance['check_in'])): ?>
-                                        <div style="font-size: 0.8rem; color: var(--db-muted); margin-top: 3px;">
-                                            Checked in: <?php echo date('h:i A', strtotime($todayAttendance['check_in'])); ?>
-                                            <?php if (!empty($todayAttendance['check_out'])): ?>
-                                                &bull; Checked out: <?php echo date('h:i A', strtotime($todayAttendance['check_out'])); ?>
-                                            <?php elseif (!empty($portalClosure['needs_hr_review'])): ?>
-                                                &bull; <strong style="color: #b91c1c;">Unclosed workday flagged for HR review</strong>
-                                            <?php endif; ?>
-                                        </div>
-                                    <?php endif; ?>
-                                </div>
-                            <?php else: ?>
-                                <h3 class="attendance-title">Today's Attendance Status</h3>
-                                <div class="attendance-sub">
-                                    <?php if ($todayAttendance && !empty($todayAttendance['check_in'])): ?>
-                                        <span style="color: var(--db-emerald); font-weight: 700;">
-                                            <i class="fas fa-circle-check"></i> Checked In at <?php echo date('h:i A', strtotime($todayAttendance['check_in'])); ?>
-                                        </span>
-                                        <?php if (!empty($todayAttendance['check_out'])): ?>
-                                            &bull; Checked Out at <?php echo date('h:i A', strtotime($todayAttendance['check_out'])); ?>
-                                        <?php else: ?>
-                                            &bull; Cutoff at <?php echo !empty($portalClosure['scheduled_checkout_time']) ? date('h:i A', strtotime($portalClosure['scheduled_checkout_time'])) : 'End of shift'; ?> (<?php echo $portalClosure['time_remaining_text'] ?? 'Active'; ?> remaining)
-                                        <?php endif; ?>
-                                    <?php else: ?>
-                                        <span style="color: var(--db-amber); font-weight: 600;">
-                                            <i class="fas fa-clock"></i> No check-in recorded yet &bull; Portal closes at <?php echo !empty($portalClosure['scheduled_checkout_time']) ? date('h:i A', strtotime($portalClosure['scheduled_checkout_time'])) : 'scheduled end time'; ?>
-                                        </span>
-                                    <?php endif; ?>
-                                </div>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-
-                    <a href="employee_attendance" class="action-btn <?php echo ($portalClosure && $portalClosure['is_closed']) ? 'action-btn-outline' : 'action-btn-primary'; ?>">
-                        <?php if ($portalClosure && $portalClosure['is_closed']): ?>
-                            <i class="fas fa-eye"></i> View Attendance Summary
-                        <?php else: ?>
-                            <i class="fas fa-location-arrow"></i> Open Attendance Desk
-                        <?php endif; ?>
-                    </a>
                 </section>
 
                 <!-- Recent Tasks & Activity -->

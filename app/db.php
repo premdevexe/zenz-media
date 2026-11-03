@@ -17,22 +17,27 @@ if (!function_exists('str_contains')) {
 }
 
 // Load environment variables from .env file if present
-$envPath = dirname(__DIR__) . '/.env';
-if (file_exists($envPath) && is_readable($envPath)) {
-    $envLines = file($envPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    foreach ($envLines as $line) {
-        $line = trim($line);
-        if ($line === '' || str_starts_with($line, '#')) {
-            continue;
-        }
-        if (strpos($line, '=') !== false) {
-            list($key, $val) = explode('=', $line, 2);
-            $key = trim($key);
-            $val = trim($val, " \t\n\r\0\x0B\"'");
-            if (!array_key_exists($key, $_SERVER) && !array_key_exists($key, $_ENV)) {
-                putenv("$key=$val");
-                $_ENV[$key] = $val;
-                $_SERVER[$key] = $val;
+$envPaths = [
+    dirname(__DIR__) . '/.env',
+    __DIR__ . '/.env'
+];
+foreach ($envPaths as $envPath) {
+    if (file_exists($envPath) && is_readable($envPath)) {
+        $envLines = file($envPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($envLines as $line) {
+            $line = trim($line);
+            if ($line === '' || str_starts_with($line, '#')) {
+                continue;
+            }
+            if (strpos($line, '=') !== false) {
+                list($key, $val) = explode('=', $line, 2);
+                $key = trim($key);
+                $val = trim($val, " \t\n\r\0\x0B\"'");
+                if (!array_key_exists($key, $_SERVER) && !array_key_exists($key, $_ENV)) {
+                    putenv("$key=$val");
+                    $_ENV[$key] = $val;
+                    $_SERVER[$key] = $val;
+                }
             }
         }
     }
@@ -60,9 +65,9 @@ if (date_default_timezone_get() !== 'Asia/Kolkata') {
 
 // Database configuration from environment or local XAMPP defaults
 $host     = $_ENV['DB_HOST'] ?? (getenv('DB_HOST') ?: 'localhost');
-$dbname   = $_ENV['DB_NAME'] ?? (getenv('DB_NAME') ?: 'qaschyan_po');
-$username = $_ENV['DB_USER'] ?? (getenv('DB_USER') ?: 'root');
-$password = $_ENV['DB_PASSWORD'] ?? (getenv('DB_PASSWORD') !== false ? getenv('DB_PASSWORD') : '');
+$dbname   = $_ENV['DB_NAME'] ?? (getenv('DB_NAME') ?: 'qaschyan_emp');
+$username = $_ENV['DB_USER'] ?? (getenv('DB_USER') ?: 'qaschyan_emp');
+$password = $_ENV['DB_PASSWORD'] ?? ($_ENV['DB_PASS'] ?? (getenv('DB_PASSWORD') !== false ? getenv('DB_PASSWORD') : (getenv('DB_PASS') !== false ? getenv('DB_PASS') : 'qaschyan_emp')));
 $charset  = 'utf8mb4';
 
 $pdoOptions = [
@@ -92,6 +97,9 @@ try {
 
     // Intelligent fallback for unconfigured local XAMPP environments only
     $fallbackConfigs = [
+        ['host' => 'localhost', 'dbname' => 'qaschyan_emp', 'username' => 'qaschyan_emp', 'password' => 'qaschyan_emp'],
+        ['host' => 'localhost', 'dbname' => 'qaschyan_emp', 'username' => 'root', 'password' => ''],
+        ['host' => 'localhost', 'dbname' => 'qaschyan_staging', 'username' => 'root', 'password' => ''],
         ['host' => 'localhost', 'dbname' => 'qaschyan_po', 'username' => 'root', 'password' => ''],
     ];
 
@@ -147,4 +155,16 @@ try {
         }
     }
 }
+
+// Global alias for compatibility with legacy website scripts
+if (isset($pdo) && !isset($conn)) {
+    $conn = $pdo;
+}
+
+// Define database constants if not defined
+if (!defined('DB_HOST')) define('DB_HOST', $host);
+if (!defined('DB_NAME')) define('DB_NAME', $dbname);
+if (!defined('DB_USER')) define('DB_USER', $username);
+if (!defined('DB_PASS')) define('DB_PASS', $password);
+if (!defined('DB_CHARSET')) define('DB_CHARSET', $charset);
 ?>

@@ -46,7 +46,7 @@ function uploadSiteImage($field, $type, $uploadDir) {
         throw new RuntimeException(ucfirst($type) . ' must be smaller than 2 MB.');
     }
 
-    $mime = (new finfo(FILEINFO_MIME_TYPE))->file($_FILES[$field]['tmp_name']);
+    $mime = Security::detectFileMimeType($_FILES[$field]['tmp_name'], $_FILES[$field]['name'] ?? '');
     $types = ($type === 'favicon')
         ? ['image/png' => 'png', 'image/x-icon' => 'ico', 'image/vnd.microsoft.icon' => 'ico']
         : ['image/png' => 'png', 'image/jpeg' => 'jpg', 'image/webp' => 'webp'];
@@ -202,7 +202,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
             if ($source) {
                 $newName = $source['site_name'] . ' (Copy)';
-                $ins = $pdo->prepare('INSERT INTO site_settings (site_name, tagline, brand_color, support_email, support_phone, logo, favicon, smtp_host, smtp_port, smtp_encryption, smtp_username, smtp_password, smtp_from_email, smtp_from_name, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)');
+                $ins = $pdo->prepare('INSERT INTO site_settings (site_name, tagline, brand_color, support_email, support_phone, logo, favicon, smtp_host, smtp_port, smtp_encryption, smtp_username, smtp_password, smtp_from_email, smtp_from_name, is_active, employee_index_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)');
                 $ins->execute([
                     $newName,
                     $source['tagline'] ?? null,
@@ -217,7 +217,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                     $source['smtp_username'] ?? null,
                     $source['smtp_password'] ?? null,
                     $source['smtp_from_email'] ?? null,
-                    $source['smtp_from_name'] ?? null
+                    $source['smtp_from_name'] ?? null,
+                    $source['employee_index_enabled'] ?? 1
                 ]);
                 $clonedId = (int)$pdo->lastInsertId();
 
@@ -234,6 +235,29 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             $_SESSION['site_settings_flash_type'] = 'error';
         }
         header('Location: site_settings');
+        exit();
+    }
+
+    // 4. Toggle Employee Index Page Access Action
+    elseif (isset($_POST['toggle_employee_index'])) {
+        $newState = !empty($_POST['employee_index_enabled']) ? 1 : 0;
+        try {
+            $stmt = $pdo->prepare('UPDATE site_settings SET employee_index_enabled = ? WHERE is_active = 1');
+            $stmt->execute([$newState]);
+            if ($stmt->rowCount() === 0) {
+                $pdo->prepare('UPDATE site_settings SET employee_index_enabled = ?')->execute([$newState]);
+            }
+            Security::logAudit($adminId, 'toggle_employee_index', 'site_settings', 0, ['employee_index_enabled' => $newState]);
+            $statusText = $newState ? 'turned ON' : 'turned OFF';
+            $_SESSION['site_settings_flash'] = "Employee Panel index page has been successfully {$statusText}.";
+            $_SESSION['site_settings_flash_type'] = 'success';
+        } catch (PDOException $e) {
+            error_log('Toggle employee index: ' . $e->getMessage());
+            $_SESSION['site_settings_flash'] = 'Error updating Employee Panel index page status.';
+            $_SESSION['site_settings_flash_type'] = 'error';
+        }
+        $returnUrl = !empty($_POST['return_to']) ? $_POST['return_to'] : 'site_settings';
+        header('Location: ' . $returnUrl);
         exit();
     }
 
@@ -334,6 +358,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                 $logo = $newLogo ?: ($old['logo'] ?? null);
                 $favicon = $newFavicon ?: ($old['favicon'] ?? null);
                 $storedPassword = ($smtpPassword !== '') ? protectSmtpPassword($smtpPassword) : ($old['smtp_password'] ?? null);
+                $empIndexEnabled = isset($_POST['employee_index_enabled']) ? (int)$_POST['employee_index_enabled'] : 1;
 
                 $pdo->beginTransaction();
                 if ($isActive) {
@@ -344,12 +369,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                     $stmt = $pdo->prepare('UPDATE site_settings SET
                         site_name=?, tagline=?, brand_color=?, support_email=?, support_phone=?,
                         logo=?, favicon=?, smtp_host=?, smtp_port=?, smtp_encryption=?,
-                        smtp_username=?, smtp_password=?, smtp_from_email=?, smtp_from_name=?, is_active=?
+                        smtp_username=?, smtp_password=?, smtp_from_email=?, smtp_from_name=?, is_active=?,
+                        employee_index_enabled=?
                         WHERE id=?');
                     $stmt->execute([
                         $siteName, $tagline ?: null, $brandColor, $supportEmail ?: null, $supportPhone ?: null,
                         $logo, $favicon, $smtpHost ?: null, $smtpPort, $smtpEncryption,
-                        $smtpUsername ?: null, $storedPassword, $fromEmail ?: null, $fromName ?: null, $isActive, $id
+                        $smtpUsername ?: null, $storedPassword, $fromEmail ?: null, $fromName ?: null, $isActive,
+                        $empIndexEnabled, $id
                     ]);
                     $savedId = $id;
                     $flashMsg = "Site settings for '{$siteName}' updated successfully.";
@@ -357,12 +384,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                     $stmt = $pdo->prepare('INSERT INTO site_settings
                         (site_name, tagline, brand_color, support_email, support_phone,
                          logo, favicon, smtp_host, smtp_port, smtp_encryption,
-                         smtp_username, smtp_password, smtp_from_email, smtp_from_name, is_active)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+                         smtp_username, smtp_password, smtp_from_email, smtp_from_name, is_active,
+                         employee_index_enabled)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
                     $stmt->execute([
                         $siteName, $tagline ?: null, $brandColor, $supportEmail ?: null, $supportPhone ?: null,
                         $logo, $favicon, $smtpHost ?: null, $smtpPort, $smtpEncryption,
-                        $smtpUsername ?: null, $storedPassword, $fromEmail ?: null, $fromName ?: null, $isActive
+                        $smtpUsername ?: null, $storedPassword, $fromEmail ?: null, $fromName ?: null, $isActive,
+                        $empIndexEnabled
                     ]);
                     $savedId = (int)$pdo->lastInsertId();
                     $flashMsg = "New site profile '{$siteName}' created successfully.";
@@ -370,7 +399,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
                 $pdo->commit();
 
-                Security::logAudit($adminId, $id ? 'update_settings' : 'create_settings', 'site_settings', $savedId, ['site_name' => $siteName, 'is_active' => $isActive]);
+                Security::logAudit($adminId, $id ? 'update_settings' : 'create_settings', 'site_settings', $savedId, ['site_name' => $siteName, 'is_active' => $isActive, 'employee_index_enabled' => $empIndexEnabled]);
 
                 // Clean up replaced images
                 if ($newLogo && !empty($old['logo'])) removeSiteImage($old['logo'], $uploadDir);
@@ -496,6 +525,27 @@ include 'header.php';
     gap: 10px;
     flex-wrap: wrap;
 }
+.settings-nav-dropdown-wrap {
+    display: inline-flex;
+    align-items: center;
+}
+.settings-nav-select {
+    padding: 9px 14px;
+    font-size: 0.86rem;
+    font-weight: 700;
+    border-radius: var(--adm-radius-md);
+    border: 1.5px solid var(--adm-brand);
+    background: var(--adm-surface);
+    color: var(--adm-text-main);
+    cursor: pointer;
+    font-family: inherit;
+    outline: none;
+    transition: all var(--adm-transition);
+}
+.settings-nav-select:focus {
+    border-color: var(--adm-brand);
+    box-shadow: 0 0 0 3px var(--adm-brand-light);
+}
 
 /* Modern SaaS Buttons */
 .btn-saas {
@@ -544,71 +594,6 @@ include 'header.php';
     background: var(--adm-brand);
     color: #ffffff;
     transform: translateY(-1px);
-}
-
-/* 4 Enterprise KPI Cards */
-.settings-kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 16px;
-}
-.kpi-card {
-    background: var(--adm-surface);
-    border: 1px solid var(--adm-border);
-    border-radius: var(--adm-radius-xl);
-    padding: 20px;
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    box-shadow: var(--adm-shadow-card);
-    transition: transform var(--adm-transition), box-shadow var(--adm-transition);
-}
-.kpi-card:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--adm-shadow-hover);
-}
-.kpi-icon-wrap {
-    width: 48px;
-    height: 48px;
-    border-radius: var(--adm-radius-lg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.3rem;
-    flex-shrink: 0;
-}
-.kpi-icon-indigo { background: rgba(79, 70, 229, 0.12); color: #4f46e5; }
-.kpi-icon-emerald { background: rgba(5, 150, 105, 0.12); color: #059669; }
-.kpi-icon-purple { background: rgba(147, 51, 234, 0.12); color: #9333ea; }
-.kpi-icon-amber { background: rgba(217, 119, 6, 0.12); color: #d97706; }
-
-.kpi-info { min-width: 0; flex: 1; }
-.kpi-label {
-    font-size: 0.76rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--adm-muted);
-    margin-bottom: 4px;
-}
-.kpi-value {
-    font-family: 'Outfit', sans-serif;
-    font-size: 1.35rem;
-    font-weight: 800;
-    color: var(--adm-text-main);
-    line-height: 1.2;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.kpi-sub {
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: var(--adm-muted);
-    margin-top: 4px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
 }
 
 /* Main 2-Column Responsive Workspace Grid */
@@ -1007,10 +992,8 @@ include 'header.php';
 
 @media (max-width: 1050px) {
     .settings-workspace-layout { grid-template-columns: 1fr; }
-    .settings-kpi-grid { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 640px) {
-    .settings-kpi-grid { grid-template-columns: 1fr; }
     .form-grid-2, .form-grid-3 { grid-template-columns: 1fr; }
     .settings-hero-header { flex-direction: column; align-items: stretch; }
     .settings-actions-group { width: 100%; }
@@ -1040,6 +1023,13 @@ include 'header.php';
         </div>
 
         <div class="settings-actions-group">
+            <div class="settings-nav-dropdown-wrap">
+                <select class="settings-nav-select" onchange="if(this.value) window.location.href=this.value;" aria-label="Console Preferences Navigation">
+                    <option value="settings">Account Credentials &amp; Security</option>
+                    <option value="site_settings" selected>Branding &amp; SMTP Infrastructure</option>
+                    <option value="office_location">Office GPS &amp; Geofencing</option>
+                </select>
+            </div>
             <div style="display: flex; gap: 8px; flex-wrap: wrap;">
                 <a href="settings" class="btn-saas btn-saas-secondary" title="Navigate to Account and Security Settings">
                     <i class="fa-solid fa-user-gear"></i>
@@ -1084,62 +1074,66 @@ include 'header.php';
         </div>
     <?php endif; ?>
 
-    <!-- ─── 4 Enterprise KPI Stat Metric Cards ────────────────────────────────── -->
-    <div class="settings-kpi-grid">
-        <!-- Card 1: Active Organization Name -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-indigo">
-                <i class="fa-solid fa-building"></i>
+    <!-- ─── Employee Panel Index Page Status & Quick On/Off Toggle ────────────── -->
+    <?php 
+        $activeEmpIndexOn = !empty($activeConfig['employee_index_enabled']);
+    ?>
+    <div class="panel-status-card" style="background: var(--adm-surface); border: 1px solid var(--adm-border); border-radius: var(--adm-radius-lg); padding: 18px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin-bottom: 22px; box-shadow: var(--adm-shadow-sm);">
+        <div style="display: flex; align-items: center; gap: 14px;">
+            <div style="width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.25rem; background: <?php echo $activeEmpIndexOn ? 'rgba(5, 150, 105, 0.12)' : 'rgba(225, 29, 72, 0.12)'; ?>; color: <?php echo $activeEmpIndexOn ? 'var(--adm-success)' : 'var(--adm-danger)'; ?>;">
+                <i class="fa-solid fa-power-off"></i>
             </div>
-            <div class="kpi-info">
-                <div class="kpi-label">Active Organization</div>
-                <div class="kpi-value" title="<?php echo htmlspecialchars($activeName); ?>"><?php echo htmlspecialchars($activeName); ?></div>
-                <div class="kpi-sub">
-                    <span style="color: #059669;"><i class="fa-solid fa-circle-check"></i> Enforced Brand</span>
+            <div>
+                <div style="font-weight: 700; font-size: 1.05rem; color: var(--adm-text-main); display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                    <span>Employee Panel Index Page Access</span>
+                    <?php if ($activeEmpIndexOn): ?>
+                        <span class="badge-saas" style="background: var(--adm-success-light); color: var(--adm-success); border: 1px solid rgba(5, 150, 105, 0.25); font-size: 0.75rem; padding: 3px 10px; border-radius: 9999px; font-weight: 700;">
+                            <i class="fa-solid fa-circle-check"></i> ON &bull; Accessible Normally
+                        </span>
+                    <?php else: ?>
+                        <span class="badge-saas" style="background: var(--adm-danger-light); color: var(--adm-danger); border: 1px solid var(--adm-danger-border); font-size: 0.75rem; padding: 3px 10px; border-radius: 9999px; font-weight: 700;">
+                            <i class="fa-solid fa-circle-xmark"></i> OFF &bull; Offline Notice Displayed
+                        </span>
+                    <?php endif; ?>
+                </div>
+                <div style="font-size: 0.82rem; color: var(--adm-muted); margin-top: 4px; line-height: 1.4;">
+                    <?php if ($activeEmpIndexOn): ?>
+                        The Employee Panel index page is currently accessible normally to employees and visitors.
+                    <?php else: ?>
+                        The Employee Panel index page is disabled. Employees and visitors see a clean offline notice. The Admin Panel is unaffected.
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
 
-        <!-- Card 2: Visual Branding Status -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-emerald">
-                <i class="fa-solid fa-images"></i>
-            </div>
-            <div class="kpi-info">
-                <div class="kpi-label">Branding Assets</div>
-                <div class="kpi-value"><?php echo $activeLogo ? 'Custom Logo' : 'Default Icon'; ?></div>
-                <div class="kpi-sub">
-                    <span>Favicon: <?php echo $activeFavicon ? 'Custom ICO/PNG' : 'Default'; ?></span>
-                </div>
-            </div>
-        </div>
-
-        <!-- Card 3: Outgoing SMTP Delivery -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-purple">
-                <i class="fa-solid fa-envelope-circle-check"></i>
-            </div>
-            <div class="kpi-info">
-                <div class="kpi-label">SMTP Delivery</div>
-                <div class="kpi-value" title="<?php echo htmlspecialchars($activeSmtpHost); ?>"><?php echo htmlspecialchars($activeSmtpHost); ?></div>
-                <div class="kpi-sub">
-                    <span>Port: <?php echo $activeConfig['smtp_port'] ?? 587; ?> &bull; <?php echo strtoupper($activeConfig['smtp_encryption'] ?? 'TLS'); ?></span>
-                </div>
-            </div>
-        </div>
-
-        <!-- Card 4: Saved Configuration Profiles -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-amber">
-                <i class="fa-solid fa-layer-group"></i>
-            </div>
-            <div class="kpi-info">
-                <div class="kpi-label">Brand Profiles</div>
-                <div class="kpi-value"><?php echo $totalProfilesCount; ?> Profile<?php echo $totalProfilesCount === 1 ? '' : 's'; ?></div>
-                <div class="kpi-sub">
-                    <span>1 Active &bull; <?php echo max(0, $totalProfilesCount - 1); ?> Standby</span>
-                </div>
-            </div>
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <form method="POST" action="" style="margin: 0; display: inline;">
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrfToken); ?>">
+                <input type="hidden" name="toggle_employee_index" value="1">
+                <?php if ($activeEmpIndexOn): ?>
+                    <input type="hidden" name="employee_index_enabled" value="0">
+                    <button type="submit" class="btn-saas" style="background: #e11d48; color: #fff; border: none; padding: 9px 18px; border-radius: var(--adm-radius-md); font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 8px;">
+                        <i class="fa-solid fa-power-off"></i>
+                        <span>Turn OFF Index Page</span>
+                    </button>
+                <?php else: ?>
+                    <input type="hidden" name="employee_index_enabled" value="1">
+                    <button type="submit" class="btn-saas" style="background: #059669; color: #fff; border: none; padding: 9px 18px; border-radius: var(--adm-radius-md); font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 8px;">
+                        <i class="fa-solid fa-power-off"></i>
+                        <span>Turn ON Index Page</span>
+                    </button>
+                <?php endif; ?>
+            </form>
+            <a href="/" target="_blank" class="btn-saas btn-saas-secondary" title="View Current Employee Index Page">
+                <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                <span>View Index Page</span>
+            </a>
+            <?php if (!$activeEmpIndexOn): ?>
+                <a href="/?preview=1" target="_blank" class="btn-saas btn-saas-secondary" title="Preview Full Index Page as Administrator">
+                    <i class="fa-solid fa-eye"></i>
+                    <span>Preview (Admin)</span>
+                </a>
+            <?php endif; ?>
         </div>
     </div>
 
@@ -1323,6 +1317,20 @@ include 'header.php';
                         <input type="text" name="support_phone" id="support_phone" class="form-input-control" value="<?php echo htmlspecialchars($editing['support_phone'] ?? ''); ?>" placeholder="+91 98765 43210">
                     </div>
                 </div>
+
+                <!-- Section 4: Employee Panel Index Page Access Control -->
+                <div class="form-section-divider">
+                    <i class="fa-solid fa-power-off"></i> Employee Panel Index Page Access Control
+                </div>
+
+                <label class="active-profile-card" style="margin-bottom: 18px;">
+                    <input type="hidden" name="employee_index_enabled" value="0">
+                    <input type="checkbox" name="employee_index_enabled" value="1" <?php echo !isset($editing['employee_index_enabled']) || $editing['employee_index_enabled'] ? 'checked' : ''; ?>>
+                    <div class="active-profile-info">
+                        <strong>Turn Employee Panel Index Page ON</strong>
+                        <small>When checked (ON), employees and visitors can access the Employee Panel index page normally. When unchecked (OFF), access is blocked and a clean offline notice is displayed. The Admin Panel is never blocked.</small>
+                    </div>
+                </label>
 
                 <!-- Active Policy Enforce Card -->
                 <label class="active-profile-card">

@@ -10,16 +10,21 @@ Security::initSecureSession();
 
 // Check if admin is logged in
 if (!Security::isAuthenticated()) {
-    header("Location: ../admin");
+    if (isset($_SESSION['employee_logged_in']) && $_SESSION['employee_logged_in'] === true) {
+        header("Location: /employee_dashboard");
+        exit();
+    }
+    header("Location: /login.php");
     exit();
 }
 
 $adminId = (int)($_SESSION['admin_id'] ?? 1);
-Security::requirePermission('employees.view', $adminId);
+Security::requirePermission('employees.view', $adminId, '../admin/dashboard');
 
 $canCreate = Security::hasPermission('employees.create', $adminId);
 $canEdit   = Security::hasPermission('employees.edit', $adminId);
 $canDelete = Security::hasPermission('employees.delete', $adminId);
+$isSuperAdmin = Security::isSuperAdmin($adminId);
 
 // -------------------------------------------------------------
 // Secure Aadhaar Document Viewer Gateway (RBAC Protected)
@@ -40,27 +45,47 @@ if (isset($_GET['action']) && $_GET['action'] === 'view_aadhar') {
             die("No Aadhaar document found for this employee.");
         }
 
-        $baseDir = realpath(__DIR__ . '/../assets/uploads/aadhar');
-        $filePath = realpath(__DIR__ . '/../assets/uploads/aadhar/' . basename($empDoc['aadhar_image']));
+        $uploadDir = __DIR__ . '/../assets/uploads/aadhar';
+        if (!is_dir($uploadDir)) {
+            @mkdir($uploadDir, 0755, true);
+        }
 
-        if (!$filePath || !$baseDir || !str_starts_with($filePath, $baseDir) || !file_exists($filePath)) {
+        $baseDir = realpath($uploadDir);
+        $cleanDoc = basename($empDoc['aadhar_image']);
+        $rawFilePath = $uploadDir . '/' . $cleanDoc;
+        $filePath = realpath($rawFilePath);
+
+        if (!$filePath || !$baseDir || !file_exists($filePath)) {
             http_response_code(404);
             die("Document not found on storage.");
+        }
+
+        $safeBase = rtrim($baseDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if (!str_starts_with($filePath, $safeBase)) {
+            http_response_code(403);
+            die("Access denied.");
         }
 
         Security::logAudit('view_employee_aadhar', 'employee', $empId, [
             'employee_name' => trim($empDoc['first_name'] . ' ' . $empDoc['last_name'])
         ], $adminId);
 
-        $mime = mime_content_type($filePath) ?: 'application/octet-stream';
+        while (ob_get_level()) {
+            ob_end_clean();
+        }
+
+        $mime = Security::detectFileMimeType($filePath) ?: 'application/octet-stream';
+        $ext = pathinfo($filePath, PATHINFO_EXTENSION);
+
         header('Content-Type: ' . $mime);
-        header('Content-Disposition: inline; filename="aadhaar_emp_' . $empId . '.' . pathinfo($filePath, PATHINFO_EXTENSION) . '"');
+        header('Content-Disposition: inline; filename="aadhaar_emp_' . $empId . '.' . $ext . '"');
         header('Content-Length: ' . filesize($filePath));
         header('X-Content-Type-Options: nosniff');
         header('Cache-Control: private, no-cache, no-store, must-revalidate');
         readfile($filePath);
         exit();
-    } catch (PDOException $e) {
+    } catch (Throwable $e) {
+        error_log("Error loading Aadhaar document (Admin viewing Employee {$empId}): " . $e->getMessage());
         http_response_code(500);
         die("Error loading document.");
     }
@@ -217,6 +242,153 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['delete_employ
 }
 
 // -------------------------------------------------------------
+// Handle Direct Role Update from All Employees Page (RBAC)
+// -------------------------------------------------------------
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action']) && $_POST['action'] === 'update_employee_role') {
+    $isAjax = (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') ||
+              (isset($_SERVER['HTTP_ACCEPT']) && str_contains($_SERVER['HTTP_ACCEPT'], 'application/json'));
+
+    $csrfToken = $_POST['csrf_token'] ?? '';
+    if (!Security::validateCSRFToken($csrfToken, 'employee_role_update') &&
+        !Security::validateCSRFToken($csrfToken, 'employee_form') &&
+        !Security::validateCSRFToken($csrfToken, 'default')) {
+        if ($isAjax) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'message' => 'Invalid or expired security token. Please refresh.']);
+            exit();
+        }
+        $message = "Invalid security token. Please refresh and try again.";
+        $messageType = 'error';
+    } elseif (!$canEdit) {
+        if ($isAjax) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'message' => 'Access Denied: You do not have permission to edit employee roles.']);
+            exit();
+        }
+        $message = "Access Denied: You do not have permission to edit employee roles.";
+        $messageType = 'error';
+    } else {
+        $empId = (int)($_POST['employee_id'] ?? 0);
+        $newRoleId = !empty($_POST['role_id']) ? (int)$_POST['role_id'] : 5; // Default to Staff (5)
+
+        // Verify employee exists
+        $chkEmp = $pdo->prepare("SELECT id, first_name, last_name, email, role_id FROM employees WHERE id = ?");
+        $chkEmp->execute([$empId]);
+        $empRecord = $chkEmp->fetch(PDO::FETCH_ASSOC);
+
+        if (!$empRecord) {
+            if ($isAjax) {
+                http_response_code(404);
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(['success' => false, 'message' => 'Employee record not found.']);
+                exit();
+            }
+            $message = "Employee record not found.";
+            $messageType = 'error';
+        } else {
+            // Self-modification protection: users cannot change their own role
+            $isSelf = ($empId === (int)$adminId) ||
+                (!empty($_SESSION['admin_email']) && !empty($empRecord['email']) && strtolower($_SESSION['admin_email']) === strtolower($empRecord['email'])) ||
+                (!empty($_SESSION['employee_email']) && !empty($empRecord['email']) && strtolower($_SESSION['employee_email']) === strtolower($empRecord['email']));
+
+            if ($isSelf && (int)$newRoleId !== (int)$empRecord['role_id']) {
+                if ($isAjax) {
+                    http_response_code(403);
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo json_encode(['success' => false, 'message' => 'Access Denied: You cannot modify your own assigned role.']);
+                    exit();
+                }
+                $message = "Access Denied: You cannot modify your own assigned role.";
+                $messageType = 'error';
+            } elseif (!Security::canAssignRole($newRoleId, $adminId)) {
+                if ($isAjax) {
+                    http_response_code(403);
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo json_encode(['success' => false, 'message' => 'Access Denied: You do not possess authorization to grant Administrator privileges.']);
+                    exit();
+                }
+                $message = "Access Denied: You do not possess authorization to grant Administrator privileges.";
+                $messageType = 'error';
+            } else {
+                // Check if target is an Admin and acting user is not
+                $targetIsAdmin = false;
+                if (!empty($empRecord['role_id'])) {
+                    $curRoleStmt = $pdo->prepare("SELECT slug FROM roles WHERE id = ?");
+                    $curRoleStmt->execute([(int)$empRecord['role_id']]);
+                    $curRoleSlug = $curRoleStmt->fetchColumn();
+                    if ($curRoleSlug && in_array(Security::normalizeRoleSlug($curRoleSlug), ['admin', 'super_admin'], true)) {
+                        $targetIsAdmin = true;
+                    }
+                }
+
+                if ($targetIsAdmin && !Security::isSuperAdmin($adminId)) {
+                    if ($isAjax) {
+                        http_response_code(403);
+                        header('Content-Type: application/json; charset=utf-8');
+                        echo json_encode(['success' => false, 'message' => 'Access Denied: You cannot modify an Administrator account.']);
+                        exit();
+                    }
+                    $message = "Access Denied: You cannot modify an Administrator account.";
+                    $messageType = 'error';
+                } else {
+                    // Verify role exists
+                    $rCheck = $pdo->prepare("SELECT id, name, slug FROM roles WHERE id = ?");
+                    $rCheck->execute([$newRoleId]);
+                    $roleRow = $rCheck->fetch(PDO::FETCH_ASSOC);
+                    if (!$roleRow) {
+                        $newRoleId = 5;
+                        $newRoleName = 'Staff';
+                        $newRoleSlug = 'staff';
+                    } else {
+                        $newRoleName = $roleRow['name'];
+                        $newRoleSlug = $roleRow['slug'];
+                    }
+
+                    try {
+                        $updStmt = $pdo->prepare("UPDATE employees SET role_id = ? WHERE id = ?");
+                        $updStmt->execute([$newRoleId, $empId]);
+
+                        Security::logAudit($adminId, 'update_employee_role', 'employee', $empId, [
+                            'employee_name' => trim($empRecord['first_name'] . ' ' . $empRecord['last_name']),
+                            'previous_role_id' => $empRecord['role_id'],
+                            'new_role_id' => $newRoleId,
+                            'new_role_name' => $newRoleName
+                        ]);
+
+                        if ($isAjax) {
+                            header('Content-Type: application/json; charset=utf-8');
+                            echo json_encode([
+                                'success' => true,
+                                'message' => "Role for " . htmlspecialchars($empRecord['first_name']) . " updated to {$newRoleName}.",
+                                'role_id' => $newRoleId,
+                                'role_name' => $newRoleName,
+                                'role_slug' => $newRoleSlug
+                            ]);
+                            exit();
+                        }
+
+                        $message = "Role for " . htmlspecialchars($empRecord['first_name']) . " updated to {$newRoleName}.";
+                        $messageType = 'success';
+            } catch (PDOException $e) {
+                error_log("Failed to update employee role: " . $e->getMessage());
+                if ($isAjax) {
+                    http_response_code(500);
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo json_encode(['success' => false, 'message' => 'Database error updating role.']);
+                    exit();
+                }
+                $message = "Database error updating role.";
+                $messageType = 'error';
+                    }
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------
 // Handle CREATE / UPDATE Employee Request
 // -------------------------------------------------------------
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_employee'])) {
@@ -238,6 +410,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_employ
         $email       = trim($_POST['email'] ?? '');
         $phone       = trim($_POST['phone'] ?? '');
         $department  = trim($_POST['department'] ?? '');
+        $gender      = in_array($_POST['gender'] ?? '', ['male', 'female', 'other'], true) ? $_POST['gender'] : null;
         $roleId      = !empty($_POST['role_id']) ? (int)$_POST['role_id'] : null;
         $shiftId     = !empty($_POST['shift_id']) ? (int)$_POST['shift_id'] : null;
         $position    = trim($_POST['position'] ?? '');
@@ -260,6 +433,44 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_employ
         }
         if ($salary < 0) {
             $errors[] = 'Salary cannot be negative.';
+        }
+
+        // Server-side Role Assignment Validation
+        if ($roleId !== null) {
+            $rChk = $pdo->prepare("SELECT id, name, slug FROM roles WHERE id = ?");
+            $rChk->execute([$roleId]);
+            $targetRoleRow = $rChk->fetch(PDO::FETCH_ASSOC);
+            if (!$targetRoleRow) {
+                $errors[] = 'The selected Role does not exist.';
+            } elseif (!Security::canAssignRole($roleId, $adminId)) {
+                $errors[] = 'Access Denied: Only Super Administrators can assign Administrator privileges.';
+            }
+        } else {
+            $roleId = 5; // Default to Staff
+        }
+
+        // Self-modification & Administrator account protection checks
+        if ($id) {
+            $curEmpStmt = $pdo->prepare("SELECT id, email, role_id FROM employees WHERE id = ?");
+            $curEmpStmt->execute([$id]);
+            $existingEmpData = $curEmpStmt->fetch(PDO::FETCH_ASSOC);
+            if ($existingEmpData) {
+                $isSelfEdit = ($id === (int)$adminId) ||
+                    (!empty($_SESSION['admin_email']) && strtolower($_SESSION['admin_email']) === strtolower($existingEmpData['email'])) ||
+                    (!empty($_SESSION['employee_email']) && strtolower($_SESSION['employee_email']) === strtolower($existingEmpData['email']));
+                if ($isSelfEdit && (int)$roleId !== (int)$existingEmpData['role_id']) {
+                    $errors[] = 'Access Denied: You cannot modify your own assigned role.';
+                }
+
+                if (!empty($existingEmpData['role_id'])) {
+                    $curRoleStmt = $pdo->prepare("SELECT slug FROM roles WHERE id = ?");
+                    $curRoleStmt->execute([(int)$existingEmpData['role_id']]);
+                    $curRoleSlug = $curRoleStmt->fetchColumn();
+                    if ($curRoleSlug && in_array(Security::normalizeRoleSlug($curRoleSlug), ['admin', 'super_admin'], true) && !Security::isSuperAdmin($adminId)) {
+                        $errors[] = 'Access Denied: You cannot modify an Administrator account.';
+                    }
+                }
+            }
         }
 
         // Check duplicate email
@@ -289,8 +500,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_employ
             if ($fileSize > 3 * 1024 * 1024) {
                 $errors[] = 'Avatar image must not exceed 3MB in size.';
             } else {
-                $finfo = new finfo(FILEINFO_MIME_TYPE);
-                $mimeType = $finfo->file($fileTmp);
+                $mimeType = Security::detectFileMimeType($fileTmp, $_FILES['avatar_file']['name'] ?? '');
                 $allowedMimes = [
                     'image/jpeg' => 'jpg',
                     'image/jpg'  => 'jpg',
@@ -299,7 +509,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_employ
                     'image/gif'  => 'gif'
                 ];
 
-                if (!array_key_exists($mimeType, $allowedMimes)) {
+                if (!$mimeType || !array_key_exists($mimeType, $allowedMimes)) {
                     $errors[] = 'Invalid avatar format. Allowed: JPG, PNG, WEBP, GIF.';
                 } else {
                     $ext = $allowedMimes[$mimeType];
@@ -307,8 +517,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_employ
                     $uploadedAvatarName = 'avatar_' . strtolower($cleanCode) . '_' . time() . '.' . $ext;
                     $targetPath = $avatarDir . '/' . $uploadedAvatarName;
 
-                    if (!move_uploaded_file($fileTmp, $targetPath)) {
-                        $errors[] = 'Failed to upload avatar image file.';
+                    if (!is_dir($avatarDir)) {
+                        @mkdir($avatarDir, 0755, true);
+                    }
+                    @chmod($avatarDir, 0755);
+
+                    if (move_uploaded_file($fileTmp, $targetPath)) {
+                        @chmod($targetPath, 0644);
+                    } else {
+                        $errors[] = 'Failed to upload avatar image file. Please check folder permissions.';
                     }
                 }
             }
@@ -346,23 +563,23 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_employ
                         $hashed = password_hash($password, PASSWORD_DEFAULT);
                         $stmt = $pdo->prepare("UPDATE employees SET
                             employee_id = ?, first_name = ?, last_name = ?, email = ?, password = ?,
-                            phone = ?, department = ?, role_id = ?, shift_id = ?, position = ?, salary = ?, hire_date = ?,
+                            phone = ?, department = ?, role_id = ?, shift_id = ?, position = ?, gender = ?, salary = ?, hire_date = ?,
                             status = ?, avatar = ?, work_mode = ?
                             WHERE id = ?");
                         $stmt->execute([
                             $employeeCode, $firstName, $lastName, $email, $hashed,
-                            $phone ?: null, $department ?: null, $roleId, $shiftId, $position ?: null, $salary, $hireDate,
+                            $phone ?: null, $department ?: null, $roleId, $shiftId, $position ?: null, $gender, $salary, $hireDate,
                             $status, $finalAvatar, $workMode, $id
                         ]);
                     } else {
                         $stmt = $pdo->prepare("UPDATE employees SET
                             employee_id = ?, first_name = ?, last_name = ?, email = ?,
-                            phone = ?, department = ?, role_id = ?, shift_id = ?, position = ?, salary = ?, hire_date = ?,
+                            phone = ?, department = ?, role_id = ?, shift_id = ?, position = ?, gender = ?, salary = ?, hire_date = ?,
                             status = ?, avatar = ?, work_mode = ?
                             WHERE id = ?");
                         $stmt->execute([
                             $employeeCode, $firstName, $lastName, $email,
-                            $phone ?: null, $department ?: null, $roleId, $shiftId, $position ?: null, $salary, $hireDate,
+                            $phone ?: null, $department ?: null, $roleId, $shiftId, $position ?: null, $gender, $salary, $hireDate,
                             $status, $finalAvatar, $workMode, $id
                         ]);
                     }
@@ -374,6 +591,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_employ
                         'code' => $employeeCode,
                         'name' => "$firstName $lastName",
                         'email' => $email,
+                        'gender' => $gender,
                         'role_id' => $roleId,
                         'shift_id' => $shiftId,
                         'status' => $status
@@ -392,11 +610,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_employ
 
                     $hashed = password_hash($password, PASSWORD_DEFAULT);
                     $stmt = $pdo->prepare("INSERT INTO employees
-                        (employee_id, first_name, last_name, email, password, phone, department, role_id, shift_id, position, salary, hire_date, status, avatar, work_mode)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                        (employee_id, first_name, last_name, email, password, phone, department, role_id, shift_id, position, gender, salary, hire_date, status, avatar, work_mode)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
                     $stmt->execute([
                         $employeeCode, $firstName, $lastName, $email, $hashed,
-                        $phone ?: null, $department ?: null, $roleId, $shiftId, $position ?: null, $salary, $hireDate,
+                        $phone ?: null, $department ?: null, $roleId, $shiftId, $position ?: null, $gender, $salary, $hireDate,
                         $status, $uploadedAvatarName, $workMode
                     ]);
 
@@ -408,6 +626,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_employ
                         'code' => $employeeCode,
                         'name' => "$firstName $lastName",
                         'email' => $email,
+                        'gender' => $gender,
                         'role_id' => $roleId,
                         'shift_id' => $shiftId,
                         'status' => $status
@@ -1059,6 +1278,81 @@ include __DIR__ . '/header.php';
         white-space: nowrap;
     }
 
+    .emp-role-pill--muted {
+        background: var(--adm-surface-subtle);
+        color: var(--adm-muted);
+        border-color: var(--adm-border-subtle);
+    }
+
+    /* Direct Role Selection Dropdown on All Employees Page */
+    .emp-role-inline-select {
+        font-size: 0.74rem;
+        font-weight: 700;
+        font-family: inherit;
+        padding: 3px 8px;
+        border-radius: var(--adm-radius-pill, 9999px);
+        background: var(--adm-surface);
+        color: var(--adm-brand);
+        border: 1.5px solid var(--adm-brand-border, rgba(79, 70, 229, 0.35));
+        outline: none;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        max-width: 175px;
+        line-height: 1.2;
+    }
+    .emp-role-inline-select:hover {
+        border-color: var(--adm-brand);
+        box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+        background: var(--adm-brand-light);
+    }
+    .emp-role-inline-select:focus {
+        border-color: var(--adm-brand);
+        box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.25);
+    }
+    .emp-role-inline-select.saving {
+        opacity: 0.55;
+        pointer-events: none;
+    }
+    .emp-role-inline-select.saved-success {
+        border-color: #10b981 !important;
+        background: rgba(16, 185, 129, 0.12) !important;
+        color: #059669 !important;
+    }
+
+    /* Floating Toast Notification */
+    .emp-floating-toast {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        z-index: 99999;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 20px;
+        border-radius: var(--adm-radius-md, 10px);
+        background: #0f172a;
+        color: #ffffff;
+        font-size: 0.88rem;
+        font-weight: 600;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        transform: translateY(100px);
+        opacity: 0;
+        transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        pointer-events: none;
+    }
+    .emp-floating-toast.show {
+        transform: translateY(0);
+        opacity: 1;
+        pointer-events: auto;
+    }
+    .emp-floating-toast--success {
+        border-left: 4px solid #10b981;
+    }
+    .emp-floating-toast--error {
+        border-left: 4px solid #ef4444;
+    }
+
     /* Card Details Body */
     .emp-card-body {
         padding: 18px 20px;
@@ -1443,12 +1737,15 @@ include __DIR__ . '/header.php';
 
     .form-input-modern {
         width: 100%;
+        height: 42px;
+        box-sizing: border-box;
         padding: 10px 14px;
         border-radius: var(--adm-radius-md);
         border: 1px solid var(--adm-border);
         background: var(--adm-bg);
         color: var(--adm-text-main);
         font-size: 0.9rem;
+        line-height: 1.5;
         font-family: inherit;
         transition: all var(--adm-transition);
     }
@@ -1458,6 +1755,17 @@ include __DIR__ . '/header.php';
         border-color: var(--adm-brand);
         background: var(--adm-surface);
         box-shadow: 0 0 0 3px var(--adm-brand-light);
+    }
+
+    select.form-input-modern {
+        appearance: none;
+        -webkit-appearance: none;
+        background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+        background-repeat: no-repeat;
+        background-position: right 14px center;
+        background-size: 14px;
+        padding-right: 36px;
+        cursor: pointer;
     }
 
     /* Avatar Upload Preview Area */
@@ -1778,6 +2086,15 @@ include __DIR__ . '/header.php';
             white-space: nowrap;
         }
         .emp-stats-grid { grid-template-columns: 1fr; }
+        .modal-dialog {
+            width: calc(100% - 20px) !important;
+            max-width: 100% !important;
+            margin: 10px auto !important;
+        }
+        .modal-top { padding: 16px 18px; }
+        .modal-body { padding: 16px 18px; }
+        .modal-bottom { padding: 14px 18px; flex-direction: column-reverse; gap: 8px; }
+        .modal-bottom button { width: 100%; justify-content: center; }
     }
 </style>
 
@@ -1985,10 +2302,30 @@ include __DIR__ . '/header.php';
                         <div class="emp-card-chips">
                             <span class="emp-code-pill"><?php echo $code; ?></span>
                             <span class="emp-dept-pill"><?php echo $dept; ?></span>
-                            <?php if (!empty($emp['role_name'])): ?>
-                                <span class="emp-role-pill" title="Assigned Role: <?php echo htmlspecialchars($emp['role_name']); ?>">
-                                    <i class="fa-solid fa-shield-halved"></i> <?php echo htmlspecialchars($emp['role_name']); ?>
-                                </span>
+                            <?php if ($canEdit): ?>
+                                <select class="emp-role-inline-select" 
+                                        aria-label="Assign Role for <?php echo htmlspecialchars($fullName); ?>"
+                                        data-prev-val="<?php echo (int)($emp['role_id'] ?? 5); ?>"
+                                        onchange="quickChangeEmployeeRole(<?php echo (int)$emp['id']; ?>, this.value, this)"
+                                        title="Edit Role for <?php echo htmlspecialchars($fullName); ?>">
+                                    <?php foreach ($allRoles as $r): ?>
+                                        <?php 
+                                            $isRoleAdmin = in_array(Security::normalizeRoleSlug($r['slug']), ['admin', 'super_admin'], true);
+                                            if ($isRoleAdmin && !$isSuperAdmin) continue;
+                                        ?>
+                                        <option value="<?php echo (int)$r['id']; ?>" <?php echo ((int)($emp['role_id'] ?? 5) === (int)$r['id']) ? 'selected' : ''; ?>>
+                                            <?php echo htmlspecialchars($r['name']); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            <?php else: ?>
+                                <?php if (!empty($emp['role_name'])): ?>
+                                    <span class="emp-role-pill" title="Assigned Role: <?php echo htmlspecialchars($emp['role_name']); ?>">
+                                        <i class="fa-solid fa-shield-halved"></i> <?php echo htmlspecialchars($emp['role_name']); ?>
+                                    </span>
+                                <?php else: ?>
+                                    <span class="emp-role-pill emp-role-pill--muted">Staff / Employee</span>
+                                <?php endif; ?>
                             <?php endif; ?>
                         </div>
                     </div>
@@ -2133,12 +2470,32 @@ include __DIR__ . '/header.php';
                         <!-- Role & Dept -->
                         <td>
                             <div style="font-weight:600; color:var(--adm-text-main);"><?php echo $position; ?></div>
-                            <div style="display:flex; gap:4px; flex-wrap:wrap; margin-top:3px; align-items:center;">
+                            <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px; align-items:center;">
                                 <span class="emp-dept-pill"><?php echo $dept; ?></span>
-                                <?php if (!empty($emp['role_name'])): ?>
-                                    <span class="emp-role-pill" title="Assigned Role: <?php echo htmlspecialchars($emp['role_name']); ?>">
-                                        <i class="fa-solid fa-shield-halved"></i> <?php echo htmlspecialchars($emp['role_name']); ?>
-                                    </span>
+                                <?php if ($canEdit): ?>
+                                    <select class="emp-role-inline-select" 
+                                            aria-label="Assign Role for <?php echo htmlspecialchars($fullName); ?>"
+                                            data-prev-val="<?php echo (int)($emp['role_id'] ?? 5); ?>"
+                                            onchange="quickChangeEmployeeRole(<?php echo (int)$emp['id']; ?>, this.value, this)"
+                                            title="Edit Role for <?php echo htmlspecialchars($fullName); ?>">
+                                        <?php foreach ($allRoles as $r): ?>
+                                            <?php 
+                                                $isRoleAdmin = in_array(Security::normalizeRoleSlug($r['slug']), ['admin', 'super_admin'], true);
+                                                if ($isRoleAdmin && !$isSuperAdmin) continue;
+                                            ?>
+                                            <option value="<?php echo (int)$r['id']; ?>" <?php echo ((int)($emp['role_id'] ?? 5) === (int)$r['id']) ? 'selected' : ''; ?>>
+                                                <?php echo htmlspecialchars($r['name']); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                <?php else: ?>
+                                    <?php if (!empty($emp['role_name'])): ?>
+                                        <span class="emp-role-pill" title="Assigned Role: <?php echo htmlspecialchars($emp['role_name']); ?>">
+                                            <i class="fa-solid fa-shield-halved"></i> <?php echo htmlspecialchars($emp['role_name']); ?>
+                                        </span>
+                                    <?php else: ?>
+                                        <span class="emp-role-pill emp-role-pill--muted">Staff / Employee</span>
+                                    <?php endif; ?>
                                 <?php endif; ?>
                             </div>
                         </td>
@@ -2280,10 +2637,14 @@ include __DIR__ . '/header.php';
                 <div class="form-grid-2">
                     <div class="form-group-modern">
                         <label class="form-label-modern" for="add_role_id">Role</label>
-                        <select id="add_role_id" name="role_id" class="form-input-modern">
+                        <select id="add_role_id" name="role_id" class="form-input-modern" required>
                             <option value="">Select Role</option>
                             <?php foreach ($allRoles as $r): ?>
-                                <option value="<?php echo (int)$r['id']; ?>" <?php echo ((int)($_POST['role_id'] ?? 0) === (int)$r['id']) ? 'selected' : ''; ?>>
+                                <?php 
+                                    $isRoleAdmin = in_array(Security::normalizeRoleSlug($r['slug']), ['admin', 'super_admin'], true);
+                                    if ($isRoleAdmin && !$isSuperAdmin) continue;
+                                ?>
+                                <option value="<?php echo (int)$r['id']; ?>" <?php echo ((int)($_POST['role_id'] ?? 5) === (int)$r['id']) ? 'selected' : ''; ?>>
                                     <?php echo htmlspecialchars($r['name']); ?>
                                 </option>
                             <?php endforeach; ?>
@@ -2337,32 +2698,42 @@ include __DIR__ . '/header.php';
                     </div>
                 </div>
 
-                <!-- Row 4: Phone & Position -->
+                <!-- Row 4: Phone & Gender -->
                 <div class="form-grid-2">
                     <div class="form-group-modern">
                         <label class="form-label-modern" for="add_phone">Phone Number</label>
                         <input type="tel" id="add_phone" name="phone" class="form-input-modern" placeholder="+91 98765 43210" maxlength="20">
                     </div>
                     <div class="form-group-modern">
-                        <label class="form-label-modern" for="add_position">Designation / Role</label>
-                        <input type="text" id="add_position" name="position" class="form-input-modern" placeholder="e.g. Senior Software Engineer" maxlength="100">
+                        <label class="form-label-modern" for="add_gender">Gender</label>
+                        <select id="add_gender" name="gender" class="form-input-modern">
+                            <option value="">-- Select Gender --</option>
+                            <option value="male">Male</option>
+                            <option value="female">Female</option>
+                            <option value="other">Other / Non-Binary</option>
+                        </select>
                     </div>
                 </div>
 
-                <!-- Row 5: Salary, Hire Date, Status -->
+                <!-- Row 5: Designation & Salary -->
                 <div class="form-grid-2">
+                    <div class="form-group-modern">
+                        <label class="form-label-modern" for="add_position">Designation / Role</label>
+                        <input type="text" id="add_position" name="position" class="form-input-modern" placeholder="e.g. Senior Software Engineer" maxlength="100">
+                    </div>
                     <div class="form-group-modern">
                         <label class="form-label-modern" for="add_salary">Salary (Monthly / Annual INR ₹)</label>
                         <input type="number" id="add_salary" name="salary" class="form-input-modern" step="0.01" min="0" placeholder="50000.00">
                     </div>
+                </div>
+
+                <!-- Row 6: Hire Date & Status -->
+                <div class="form-grid-2">
                     <div class="form-group-modern">
                         <label class="form-label-modern" for="add_hire_date">Hire Date</label>
                         <input type="date" id="add_hire_date" name="hire_date" class="form-input-modern" value="<?php echo date('Y-m-d'); ?>">
                     </div>
-                </div>
-
-                <div class="form-grid-2" style="margin-bottom:0;">
-                    <div class="form-group-modern" style="margin-bottom:0;">
+                    <div class="form-group-modern">
                         <label class="form-label-modern" for="add_status">Account Status</label>
                         <select id="add_status" name="status" class="form-input-modern">
                             <option value="active" selected>Active &bull; Regular employee</option>
@@ -2370,14 +2741,14 @@ include __DIR__ . '/header.php';
                             <option value="inactive">Inactive &bull; Deactivated / Suspended</option>
                         </select>
                     </div>
+                </div>
 
-                    <div class="form-group-modern" style="margin-bottom:0;">
-                        <label class="form-label-modern" for="add_work_mode">Work Mode &bull; Attendance Location</label>
-                        <select id="add_work_mode" name="work_mode" class="form-input-modern">
-                            <option value="on_site" selected>🏢 On-Site (Geofence Restricted)</option>
-                            <option value="wfh">🏠 Work From Home (Remote Mode)</option>
-                        </select>
-                    </div>
+                <div class="form-group-modern" style="margin-bottom:0;">
+                    <label class="form-label-modern" for="add_work_mode">Work Mode &bull; Attendance Location</label>
+                    <select id="add_work_mode" name="work_mode" class="form-input-modern">
+                        <option value="on_site" selected>🏢 On-Site (Geofence Restricted)</option>
+                        <option value="wfh">🏠 Work From Home (Remote Mode)</option>
+                    </select>
                 </div>
             </div>
 
@@ -2449,9 +2820,13 @@ include __DIR__ . '/header.php';
                 <div class="form-grid-2">
                     <div class="form-group-modern">
                         <label class="form-label-modern" for="edit_role_id">Role</label>
-                        <select id="edit_role_id" name="role_id" class="form-input-modern">
+                        <select id="edit_role_id" name="role_id" class="form-input-modern" required>
                             <option value="">Select Role</option>
                             <?php foreach ($allRoles as $r): ?>
+                                <?php 
+                                    $isRoleAdmin = in_array(Security::normalizeRoleSlug($r['slug']), ['admin', 'super_admin'], true);
+                                    if ($isRoleAdmin && !$isSuperAdmin) continue;
+                                ?>
                                 <option value="<?php echo (int)$r['id']; ?>">
                                     <?php echo htmlspecialchars($r['name']); ?>
                                 </option>
@@ -2506,32 +2881,42 @@ include __DIR__ . '/header.php';
                     </div>
                 </div>
 
-                <!-- Row 4: Phone & Position -->
+                <!-- Row 4: Phone & Gender -->
                 <div class="form-grid-2">
                     <div class="form-group-modern">
                         <label class="form-label-modern" for="edit_phone">Phone Number</label>
                         <input type="tel" id="edit_phone" name="phone" class="form-input-modern" maxlength="20">
                     </div>
                     <div class="form-group-modern">
-                        <label class="form-label-modern" for="edit_position">Designation / Role</label>
-                        <input type="text" id="edit_position" name="position" class="form-input-modern" maxlength="100">
+                        <label class="form-label-modern" for="edit_gender">Gender</label>
+                        <select id="edit_gender" name="gender" class="form-input-modern">
+                            <option value="">-- Not Specified --</option>
+                            <option value="male">Male</option>
+                            <option value="female">Female</option>
+                            <option value="other">Other / Non-Binary</option>
+                        </select>
                     </div>
                 </div>
 
-                <!-- Row 5: Salary & Hire Date -->
+                <!-- Row 5: Designation & Salary -->
                 <div class="form-grid-2">
+                    <div class="form-group-modern">
+                        <label class="form-label-modern" for="edit_position">Designation / Role</label>
+                        <input type="text" id="edit_position" name="position" class="form-input-modern" maxlength="100">
+                    </div>
                     <div class="form-group-modern">
                         <label class="form-label-modern" for="edit_salary">Salary (INR ₹)</label>
                         <input type="number" id="edit_salary" name="salary" class="form-input-modern" step="0.01" min="0">
                     </div>
+                </div>
+
+                <!-- Row 6: Hire Date & Status -->
+                <div class="form-grid-2">
                     <div class="form-group-modern">
                         <label class="form-label-modern" for="edit_hire_date">Hire Date</label>
                         <input type="date" id="edit_hire_date" name="hire_date" class="form-input-modern">
                     </div>
-                </div>
-
-                <div class="form-grid-2" style="margin-bottom:0;">
-                    <div class="form-group-modern" style="margin-bottom:0;">
+                    <div class="form-group-modern">
                         <label class="form-label-modern" for="edit_status">Account Status</label>
                         <select id="edit_status" name="status" class="form-input-modern">
                             <option value="active">Active &bull; Regular employee</option>
@@ -2539,14 +2924,14 @@ include __DIR__ . '/header.php';
                             <option value="inactive">Inactive &bull; Deactivated / Suspended</option>
                         </select>
                     </div>
+                </div>
 
-                    <div class="form-group-modern" style="margin-bottom:0;">
-                        <label class="form-label-modern" for="edit_work_mode">Work Mode &bull; Attendance Location</label>
-                        <select id="edit_work_mode" name="work_mode" class="form-input-modern">
-                            <option value="on_site">🏢 On-Site (Geofence Restricted)</option>
-                            <option value="wfh">🏠 Work From Home (Remote Mode)</option>
-                        </select>
-                    </div>
+                <div class="form-group-modern" style="margin-bottom:0;">
+                    <label class="form-label-modern" for="edit_work_mode">Work Mode &bull; Attendance Location</label>
+                    <select id="edit_work_mode" name="work_mode" class="form-input-modern">
+                        <option value="on_site">🏢 On-Site (Geofence Restricted)</option>
+                        <option value="wfh">🏠 Work From Home (Remote Mode)</option>
+                    </select>
                 </div>
             </div>
 
@@ -2860,6 +3245,8 @@ function openAddModal() {
     document.getElementById('add_email').value = '';
     document.getElementById('add_password').value = '';
     document.getElementById('add_phone').value = '';
+    const addGenderEl = document.getElementById('add_gender');
+    if (addGenderEl) addGenderEl.value = '';
     document.getElementById('add_position').value = '';
     const addRoleEl = document.getElementById('add_role_id');
     if (addRoleEl) addRoleEl.value = '';
@@ -2882,9 +3269,11 @@ function openEditModal(emp) {
     document.getElementById('edit_email').value = emp.email || '';
     document.getElementById('edit_password').value = '';
     document.getElementById('edit_phone').value = emp.phone || '';
+    const editGenderEl = document.getElementById('edit_gender');
+    if (editGenderEl) editGenderEl.value = emp.gender || '';
     document.getElementById('edit_department').value = emp.department || '';
     const editRoleEl = document.getElementById('edit_role_id');
-    if (editRoleEl) editRoleEl.value = emp.role_id || '';
+    if (editRoleEl) editRoleEl.value = emp.role_id ? emp.role_id : '5';
     const editShiftEl = document.getElementById('edit_shift_id');
     if (editShiftEl) editShiftEl.value = emp.shift_id || '';
     document.getElementById('edit_position').value = emp.position || '';
@@ -3046,6 +3435,108 @@ function confirmDelete(emp) {
     document.getElementById('delEmployeeName').textContent = `${emp.first_name} ${emp.last_name}`;
     document.getElementById('delEmployeeCode').textContent = emp.employee_id || `EMP-${emp.id}`;
     openModal('deleteEmployeeModal');
+}
+
+const allEmployeesList = <?php echo json_encode(array_values($employees)); ?>;
+document.addEventListener('DOMContentLoaded', function() {
+    const params = new URLSearchParams(window.location.search);
+    const action = params.get('action');
+    const targetId = params.get('id');
+    if (action === 'add') {
+        openModal('addEmployeeModal');
+    } else if (action === 'edit' && targetId) {
+        const found = allEmployeesList.find(e => String(e.id) === String(targetId));
+        if (found) {
+            openEditModal(found);
+        }
+    }
+});
+
+// ── Direct Role Change on All Employees Page (RBAC) ──
+const roleUpdateCsrfToken = <?php echo json_encode(Security::generateCSRFToken('employee_role_update')); ?>;
+
+function showToastNotice(msg, type = 'success') {
+    let toast = document.getElementById('empFloatingToast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'empFloatingToast';
+        toast.className = 'emp-floating-toast';
+        document.body.appendChild(toast);
+    }
+    toast.className = `emp-floating-toast emp-floating-toast--${type} show`;
+    const icon = (type === 'success') ? '<i class="fa-solid fa-circle-check" style="color:#10b981;"></i>' : '<i class="fa-solid fa-circle-exclamation" style="color:#ef4444;"></i>';
+    toast.innerHTML = `${icon} <span>${msg}</span>`;
+    
+    if (window._empToastTimeout) clearTimeout(window._empToastTimeout);
+    window._empToastTimeout = setTimeout(() => {
+        toast.classList.remove('show');
+    }, 3200);
+}
+
+function quickChangeEmployeeRole(empId, roleId, selectEl) {
+    if (!empId) return;
+    const prevVal = selectEl.getAttribute('data-prev-val') || '';
+    selectEl.classList.add('saving');
+
+    const formData = new FormData();
+    formData.append('action', 'update_employee_role');
+    formData.append('employee_id', empId);
+    formData.append('role_id', roleId);
+    formData.append('csrf_token', roleUpdateCsrfToken);
+
+    fetch('employee.php', {
+        method: 'POST',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json'
+        },
+        body: formData
+    })
+    .then(res => {
+        if (!res.ok) {
+            return res.json().then(errData => { throw new Error(errData.message || 'Server error'); });
+        }
+        return res.json();
+    })
+    .then(data => {
+        selectEl.classList.remove('saving');
+        if (data.success) {
+            selectEl.setAttribute('data-prev-val', roleId);
+            selectEl.classList.add('saved-success');
+            setTimeout(() => selectEl.classList.remove('saved-success'), 2000);
+
+            // Synchronize other role dropdowns for the same employee (Table vs Grid view)
+            document.querySelectorAll(`select[onchange*="quickChangeEmployeeRole(${empId},"]`).forEach(s => {
+                if (s !== selectEl) {
+                    s.value = roleId;
+                    s.setAttribute('data-prev-val', roleId);
+                }
+            });
+
+            // Update DOM data attributes for client-side search/filtering
+            const card = document.querySelector(`.emp-card[data-id="${empId}"]`);
+            if (card) {
+                card.setAttribute('data-role-id', roleId);
+                card.setAttribute('data-role-name', (data.role_name || '').toLowerCase());
+            }
+            const row = document.querySelector(`#empMainTable tr[data-id="${empId}"]`);
+            if (row) {
+                row.setAttribute('data-role-id', roleId);
+                row.setAttribute('data-role-name', (data.role_name || '').toLowerCase());
+            }
+
+            showToastNotice(data.message || 'Employee role updated successfully.', 'success');
+        } else {
+            selectEl.value = prevVal;
+            showToastNotice(data.message || 'Failed to update employee role.', 'error');
+        }
+    })
+    .catch(err => {
+        selectEl.classList.remove('saving');
+        selectEl.value = prevVal;
+        console.error('Role update error:', err);
+        showToastNotice(err.message || 'Error communicating with server.', 'error');
+    });
 }
 </script>
 
