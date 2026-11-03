@@ -1006,6 +1006,21 @@ try {
         <div class="chart-canvas-container">
             <canvas id="attendanceChart"></canvas>
         </div>
+
+        <!-- Telemetry Summary Row -->
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--adm-border-subtle); font-size: 0.80rem; color: var(--adm-muted); flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #10b981;"></span>
+                <span>On-time: <strong style="color: var(--adm-text-main);"><?php echo array_sum($chartPresent); ?></strong></span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #f59e0b;"></span>
+                <span>Delayed: <strong style="color: var(--adm-text-main);"><?php echo array_sum($chartLate); ?></strong></span>
+            </div>
+            <div>
+                <span>7-Day Total: <strong style="color: var(--adm-text-main);"><?php echo array_sum($chartPresent) + array_sum($chartLate); ?> punches</strong></span>
+            </div>
+        </div>
     </div>
 
     <!-- Today's Attendance Composition Doughnut Chart -->
@@ -1030,6 +1045,26 @@ try {
                 <div style="font-size: 0.70rem; font-weight: 700; color: var(--adm-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px;">
                     Present
                 </div>
+            </div>
+        </div>
+
+        <!-- Metric Badges Breakdown -->
+        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--adm-border-subtle); text-align: center;">
+            <div style="padding: 6px 2px; background: rgba(16, 185, 129, 0.08); border-radius: 8px; border: 1px solid rgba(16, 185, 129, 0.2);">
+                <div style="font-size: 0.68rem; font-weight: 700; color: #10b981; text-transform: uppercase;">On-time</div>
+                <div style="font-size: 1.05rem; font-weight: 800; color: var(--adm-text-main); margin-top: 2px;"><?php echo $onTimePresentToday; ?></div>
+            </div>
+            <div style="padding: 6px 2px; background: rgba(245, 158, 11, 0.08); border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.2);">
+                <div style="font-size: 0.68rem; font-weight: 700; color: #f59e0b; text-transform: uppercase;">Late</div>
+                <div style="font-size: 1.05rem; font-weight: 800; color: var(--adm-text-main); margin-top: 2px;"><?php echo $lateToday; ?></div>
+            </div>
+            <div style="padding: 6px 2px; background: rgba(239, 68, 68, 0.08); border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.2);">
+                <div style="font-size: 0.68rem; font-weight: 700; color: #ef4444; text-transform: uppercase;">Absent</div>
+                <div style="font-size: 1.05rem; font-weight: 800; color: var(--adm-text-main); margin-top: 2px;"><?php echo $absentToday; ?></div>
+            </div>
+            <div style="padding: 6px 2px; background: rgba(99, 102, 241, 0.08); border-radius: 8px; border: 1px solid rgba(99, 102, 241, 0.2);">
+                <div style="font-size: 0.68rem; font-weight: 700; color: #6366f1; text-transform: uppercase;">Leave</div>
+                <div style="font-size: 1.05rem; font-weight: 800; color: var(--adm-text-main); margin-top: 2px;"><?php echo $onLeaveToday; ?></div>
             </div>
         </div>
     </div>
@@ -1129,14 +1164,15 @@ try {
     <?php endif; ?>
 </div>
 
-<!-- Chart.js Library (Local + Fallbacks) -->
+<!-- Chart.js Library (Local + CDN Fallback) -->
 <script src="/assets/js/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script>
 if (typeof Chart === 'undefined') {
     document.write('<script src="../assets/js/chart.umd.min.js"><\/script>');
 }
 if (typeof Chart === 'undefined') {
-    document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"><\/script>');
+    document.write('<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"><\/script>');
 }
 </script>
 
