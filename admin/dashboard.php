@@ -120,7 +120,7 @@ try {
     $presentToday = $totalPresentToday; // Backward compatibility for KPI cards
 
     // 3. Late Employees Today
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'delayed' OR status = 'late' OR delay_minutes > 0)");
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'delayed' OR status = 'late')");
     $stmt->execute([$today]);
     $lateToday = (int)$stmt->fetchColumn();
 
@@ -193,7 +193,7 @@ try {
         $totAtt = (int)$stmt->fetchColumn();
         
         // Delayed arrivals on that day
-        $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'delayed' OR status = 'late' OR delay_minutes > 0)");
+        $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'delayed' OR status = 'late')");
         $stmt->execute([$d]);
         $lateAtt = (int)$stmt->fetchColumn();
 
