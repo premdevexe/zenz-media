@@ -109,54 +109,85 @@ try {
 $csrfTokenDashToggle = Security::generateCSRFToken('dashboard_toggle_index');
 
 try {
-    // 1. Total employees
+    // 1. Total workforce (all registered employees)
     $stmt = $pdo->query("SELECT COUNT(*) FROM employees");
     $totalEmployees = (int)$stmt->fetchColumn();
 
-    // 2. Present Today (anyone who checked in or has attendance recorded)
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status IN ('present', 'completed', 'half_day', 'delayed') OR status IN ('present', 'late') OR check_in IS NOT NULL)");
-    $stmt->execute([$today]);
-    $totalPresentToday = (int)$stmt->fetchColumn();
+    // Active workforce headcount (base for daily attendance & absent calculations)
+    $stmtActive = $pdo->query("SELECT COUNT(*) FROM employees WHERE status = 'active'");
+    $totalActiveEmployees = (int)$stmtActive->fetchColumn();
+    $effectiveHeadcount = $totalActiveEmployees > 0 ? $totalActiveEmployees : $totalEmployees;
+
+    // 2. Today's attendance counts (aggregated directly from attendance table)
+    $stmtToday = $pdo->prepare("
+        SELECT 
+            COUNT(CASE 
+                WHEN (attendance_status IN ('present', 'completed', 'half_day') OR status = 'present' OR check_in IS NOT NULL)
+                     AND (attendance_status != 'delayed' AND status != 'late') 
+                THEN 1 
+            END) as on_time_today,
+            COUNT(CASE 
+                WHEN attendance_status = 'delayed' OR status = 'late' 
+                THEN 1 
+            END) as late_today,
+            COUNT(CASE 
+                WHEN attendance_status = 'left_early' OR early_exit_minutes > 0 
+                THEN 1 
+            END) as early_exit_today
+        FROM attendance
+        WHERE date = ?
+    ");
+    $stmtToday->execute([$today]);
+    $todayMetrics = $stmtToday->fetch(PDO::FETCH_ASSOC);
+
+    $onTimePresentToday = (int)($todayMetrics['on_time_today'] ?? 0);
+    $lateToday = (int)($todayMetrics['late_today'] ?? 0);
+    $totalPresentToday = $onTimePresentToday + $lateToday;
     $presentToday = $totalPresentToday; // Backward compatibility for KPI cards
+    $earlyLeaveToday = (int)($todayMetrics['early_exit_today'] ?? 0);
 
-    // 3. Late Employees Today
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'delayed' OR status = 'late')");
-    $stmt->execute([$today]);
-    $lateToday = (int)$stmt->fetchColumn();
-
-    // 4. On-time Present Today (present and NOT delayed)
-    $onTimePresentToday = max(0, $totalPresentToday - $lateToday);
-
-    // 5. On Leave Today
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'on_leave' OR status = 'on_leave')");
-    $stmt->execute([$today]);
-    $onLeaveToday = (int)$stmt->fetchColumn();
+    // 3. On Leave Today (Cross-checked from BOTH attendance status AND approved leave requests)
+    $stmtLeave = $pdo->prepare("
+        SELECT COUNT(DISTINCT e.id) 
+        FROM employees e 
+        WHERE e.status = 'active' 
+          AND (
+              EXISTS (SELECT 1 FROM attendance a WHERE a.employee_id = e.id AND a.date = ? AND (a.attendance_status = 'on_leave' OR a.status = 'on_leave'))
+              OR 
+              EXISTS (SELECT 1 FROM leave_requests lr WHERE lr.employee_id = e.id AND lr.status = 'approved' AND ? BETWEEN lr.start_date AND lr.end_date)
+          )
+    ");
+    $stmtLeave->execute([$today, $today]);
+    $onLeaveToday = (int)$stmtLeave->fetchColumn();
     
-    // 6. Absent Today (Total headcount minus everyone who attended or is on leave)
-    $absentToday = max(0, $totalEmployees - $totalPresentToday - $onLeaveToday);
+    // 4. Absent Today (Active headcount minus anyone who attended or has approved leave)
+    $absentToday = max(0, $effectiveHeadcount - $totalPresentToday - $onLeaveToday);
 
-    // 7. Early Leave Today
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'left_early' OR early_exit_minutes > 0)");
-    $stmt->execute([$today]);
-    $earlyLeaveToday = (int)$stmt->fetchColumn();
-
-    // 8. Monthly Attendance Rate
-    $stmt = $pdo->prepare("SELECT attendance_status, status, COUNT(*) as cnt FROM attendance WHERE date BETWEEN ? AND ? GROUP BY attendance_status, status");
-    $stmt->execute([$monthStart, $monthEnd]);
-    $attStats = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    $totalAtt = 0;
-    $presentAtt = 0;
-    foreach ($attStats as $s) {
-        $totalAtt += $s['cnt'];
-        $st = $s['attendance_status'] ?: $s['status'];
-        if (in_array($st, ['present', 'completed', 'half_day', 'delayed', 'late'])) {
-            $presentAtt += $s['cnt'];
+    // 5. Monthly Attendance Efficiency Rate (Dynamically computed from actual database records)
+    $elapsedWorkingDays = 0;
+    $curDay = strtotime($monthStart);
+    $todayTs = strtotime($today);
+    while ($curDay <= $todayTs) {
+        $dayOfWeek = (int)date('N', $curDay);
+        if ($dayOfWeek < 6) { // Mon-Fri business working days
+            $elapsedWorkingDays++;
         }
+        $curDay = strtotime('+1 day', $curDay);
     }
-    $monthlyAttendanceRate = $totalAtt > 0 ? round(($presentAtt / $totalAtt) * 100, 1) : 0;
+    $expectedSlots = max(1, $effectiveHeadcount * max(1, $elapsedWorkingDays));
 
-    // 9. Action Items (Pending Leaves, KYC, Tasks)
+    $stmtMonthAtt = $pdo->prepare("
+        SELECT COUNT(*) 
+        FROM attendance 
+        WHERE date BETWEEN ? AND ? 
+          AND (attendance_status IN ('present', 'completed', 'half_day', 'delayed') OR status IN ('present', 'late') OR check_in IS NOT NULL)
+    ");
+    $stmtMonthAtt->execute([$monthStart, $today]);
+    $actualMonthAttendees = (int)$stmtMonthAtt->fetchColumn();
+    $monthlyAttendanceRate = round(($actualMonthAttendees / $expectedSlots) * 100, 1);
+    $monthlyAttendanceRate = min(100, $monthlyAttendanceRate);
+
+    // 6. Action Items (Pending Leaves, KYC, Tasks)
     $stmtLeaves = $pdo->query("SHOW TABLES LIKE 'leave_requests'");
     if ($stmtLeaves->rowCount() > 0) {
         $pendingLeaves = (int)$pdo->query("SELECT COUNT(*) FROM leave_requests WHERE status = 'pending'")->fetchColumn();
@@ -169,39 +200,89 @@ try {
         $activeTasks = (int)$pdo->query("SELECT COUNT(*) FROM tasks WHERE status IN ('sent', 'in_progress', 'verify')")->fetchColumn();
     }
 
-    // 10. Recent Attendance Activity Feed
-    $stmt = $pdo->query("
+    // 7. Recent Attendance Activity Feed
+    $stmtRecent = $pdo->query("
         SELECT a.*, e.first_name, e.last_name, e.avatar, e.department, e.position, e.employee_id as emp_code
         FROM attendance a
         LEFT JOIN employees e ON a.employee_id = e.id
         ORDER BY a.date DESC, a.check_in DESC
-        LIMIT 6
+        LIMIT 8
     ");
-    $recentAttendance = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $recentAttendance = $stmtRecent->fetchAll(PDO::FETCH_ASSOC);
 
-    // 11. Chart Data: Last 7 Days Attendance (True On-time vs Delayed)
+    // 8. 7-Day Attendance Telemetry (Single high-performance SQL query from attendance table)
+    $startDate = date('Y-m-d', strtotime('-6 days'));
+    $stmt7Days = $pdo->prepare("
+        SELECT 
+            date,
+            COUNT(CASE 
+                WHEN (attendance_status IN ('present', 'completed', 'half_day') OR status = 'present' OR check_in IS NOT NULL)
+                     AND (attendance_status != 'delayed' AND status != 'late') 
+                THEN 1 
+            END) as on_time_count,
+            COUNT(CASE 
+                WHEN attendance_status = 'delayed' OR status = 'late' 
+                THEN 1 
+            END) as delayed_count
+        FROM attendance
+        WHERE date BETWEEN ? AND ?
+        GROUP BY date
+        ORDER BY date ASC
+    ");
+    $stmt7Days->execute([$startDate, $today]);
+    $telemetryDbRows = $stmt7Days->fetchAll(PDO::FETCH_ASSOC);
+
+    $dataByDate = [];
+    foreach ($telemetryDbRows as $r) {
+        $dataByDate[$r['date']] = [
+            'on_time' => (int)$r['on_time_count'],
+            'delayed' => (int)$r['delayed_count']
+        ];
+    }
+
     $chartDates = [];
     $chartPresent = [];
     $chartLate = [];
     for ($i = 6; $i >= 0; $i--) {
         $d = date('Y-m-d', strtotime("-$i days"));
         $chartDates[] = date('M d', strtotime($d));
-        
-        // Total attendees on that day
-        $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status IN ('present', 'completed', 'half_day', 'delayed') OR status IN ('present', 'late') OR check_in IS NOT NULL)");
-        $stmt->execute([$d]);
-        $totAtt = (int)$stmt->fetchColumn();
-        
-        // Delayed arrivals on that day
-        $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'delayed' OR status = 'late')");
-        $stmt->execute([$d]);
-        $lateAtt = (int)$stmt->fetchColumn();
+        $chartPresent[] = $dataByDate[$d]['on_time'] ?? 0;
+        $chartLate[] = $dataByDate[$d]['delayed'] ?? 0;
+    }
 
-        // On-time arrivals (total attendees minus late arrivals)
-        $onTimeAtt = max(0, $totAtt - $lateAtt);
-        
-        $chartPresent[] = $onTimeAtt;
-        $chartLate[] = $lateAtt;
+    // Handle JSON API request for live chart telemetry updates
+    if (isset($_GET['action']) && $_GET['action'] === 'chart_telemetry') {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'chartDates' => $chartDates,
+            'chartPresent' => $chartPresent,
+            'chartLate' => $chartLate,
+            'today' => [
+                'onTime' => $onTimePresentToday,
+                'late' => $lateToday,
+                'absent' => $absentToday,
+                'onLeave' => $onLeaveToday,
+                'totalPresent' => $totalPresentToday,
+                'effectiveHeadcount' => $effectiveHeadcount,
+                'totalRegistered' => $totalEmployees
+            ],
+            'kpi' => [
+                'totalEmployees' => $totalEmployees,
+                'totalActiveEmployees' => $totalActiveEmployees,
+                'presentToday' => $totalPresentToday,
+                'absentToday' => $absentToday,
+                'lateToday' => $lateToday,
+                'earlyLeaveToday' => $earlyLeaveToday,
+                'monthlyAttendanceRate' => $monthlyAttendanceRate
+            ],
+            'summary' => [
+                'onTimeSum' => array_sum($chartPresent),
+                'lateSum' => array_sum($chartLate),
+                'totalPunches' => array_sum($chartPresent) + array_sum($chartLate)
+            ]
+        ]);
+        exit();
     }
 
 } catch (PDOException $e) {
@@ -1033,14 +1114,14 @@ try {
                 </h2>
                 <p class="chart-panel-desc">Present, absent, and delayed distribution.</p>
             </div>
-            <span class="dash-card-chip" style="font-size: 0.75rem;"><?php echo $totalPresentToday; ?> / <?php echo $totalEmployees; ?> Present</span>
+            <span class="dash-card-chip" style="font-size: 0.75rem;"><?php echo $totalPresentToday; ?> / <?php echo $effectiveHeadcount; ?> Present</span>
         </div>
 
         <div class="chart-canvas-container" style="position: relative;">
             <canvas id="todayChart"></canvas>
             <div id="todayChartCenter" style="position: absolute; top: 43%; left: 50%; transform: translate(-50%, -50%); text-align: center; pointer-events: none;">
                 <div style="font-family: 'Outfit', sans-serif; font-size: 1.45rem; font-weight: 800; color: var(--adm-text-main); line-height: 1.1;">
-                    <?php echo $totalPresentToday; ?>/<?php echo $totalEmployees; ?>
+                    <?php echo $totalPresentToday; ?>/<?php echo $effectiveHeadcount; ?>
                 </div>
                 <div style="font-size: 0.70rem; font-weight: 700; color: var(--adm-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px;">
                     Present
@@ -1105,10 +1186,16 @@ try {
                 <tbody>
                     <?php foreach ($recentAttendance as $row): 
                         $empName = trim(($row['first_name'] ?? '') . ' ' . ($row['last_name'] ?? '')) ?: 'Employee';
-                        $empInitials = strtoupper(substr($row['first_name'] ?? 'E', 0, 1) . substr($row['last_name'] ?? 'M', 0, 1));
+                        $fName = trim($row['first_name'] ?? '');
+                        $lName = trim($row['last_name'] ?? '');
+                        $empInitials = strtoupper(substr($fName ?: 'E', 0, 1) . substr($lName ?: '', 0, 1));
+                        if (strlen($empInitials) === 1) {
+                            $empInitials = strtoupper(substr($fName ?: 'EM', 0, 2));
+                        }
                         $checkInDisplay = !empty($row['check_in']) ? date('h:i A', strtotime($row['check_in'])) : '—';
                         $checkOutDisplay = !empty($row['check_out']) ? date('h:i A', strtotime($row['check_out'])) : 'Active';
                         $attStatus = strtolower($row['attendance_status'] ?: ($row['status'] ?: 'present'));
+                        $deptDisplay = !empty($row['department']) ? $row['department'] : '—';
                     ?>
                         <tr>
                             <td>
@@ -1124,7 +1211,7 @@ try {
                                     </div>
                                 </div>
                             </td>
-                            <td><?php echo htmlspecialchars($row['department'] ?: 'Operations'); ?></td>
+                            <td><?php echo htmlspecialchars($deptDisplay); ?></td>
                             <td><?php echo date('M d, Y', strtotime($row['date'])); ?></td>
                             <td>
                                 <span style="font-weight: 600; color: var(--adm-text-main);">
@@ -1308,7 +1395,7 @@ if (typeof Chart === 'undefined') {
             if (existingToday) existingToday.destroy();
 
             const ctxToday = canvasToday.getContext('2d');
-            const totalHeadcount = <?php echo (int)$totalEmployees; ?>;
+            const totalHeadcount = <?php echo (int)$effectiveHeadcount; ?>;
             const rawTodayData = [
                 <?php echo (int)$onTimePresentToday; ?>, 
                 <?php echo (int)$lateToday; ?>, 
@@ -1405,6 +1492,48 @@ if (typeof Chart === 'undefined') {
             const themeObserver = new MutationObserver(syncChartThemes);
             themeObserver.observe(htmlRoot, { attributes: true, attributeFilter: ['data-theme'] });
         } catch (e) {}
+
+        // ── Real-Time Auto-Sync with Database via Telemetry API ──
+        async function syncChartsWithDatabase() {
+            try {
+                const response = await fetch('dashboard?action=chart_telemetry');
+                if (!response.ok) return;
+                const result = await response.json();
+                if (!result || !result.success) return;
+
+                // Sync 7-Day Bar Chart
+                if (attendanceChart && result.chartDates && result.chartPresent && result.chartLate) {
+                    attendanceChart.data.labels = result.chartDates;
+                    attendanceChart.data.datasets[0].data = result.chartPresent;
+                    attendanceChart.data.datasets[1].data = result.chartLate;
+                    attendanceChart.update();
+                }
+
+                // Sync Today's Doughnut Chart
+                if (todayChart && result.today) {
+                    const freshData = [
+                        result.today.onTime,
+                        result.today.late,
+                        result.today.absent,
+                        result.today.onLeave
+                    ];
+                    const freshSum = freshData.reduce((a, b) => a + b, 0);
+                    todayChart.data.datasets[0].data = freshSum > 0 ? freshData : [1];
+                    todayChart.update();
+
+                    // Update Center Headcount Text
+                    const centerEl = document.querySelector('#todayChartCenter div:first-child');
+                    if (centerEl) {
+                        centerEl.textContent = result.today.totalPresent + '/' + result.today.effectiveHeadcount;
+                    }
+                }
+            } catch (err) {
+                // Background telemetry polling fails gracefully on connectivity loss
+            }
+        }
+
+        // Poll telemetry every 30 seconds for live updates
+        setInterval(syncChartsWithDatabase, 30000);
     }
 
     if (document.readyState === 'loading') {
