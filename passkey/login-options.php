@@ -8,6 +8,16 @@ require_once __DIR__ . '/config.php';
 
 use lbuchs\WebAuthn\Binary\ByteBuffer;
 
+// Enforce rate limiting on passkey login option challenges (30 requests / 60 seconds per IP)
+$rateLimit = Security::checkRateLimit('pk_login_opts', Security::getClientIp(), 30, 60);
+if (!$rateLimit['allowed']) {
+    sendJsonResponse([
+        'success' => false,
+        'message' => $rateLimit['message'],
+        'retry_after' => $rateLimit['retry_after']
+    ], 429);
+}
+
 $rawInput = file_get_contents('php://input');
 $input = json_decode($rawInput, true) ?: [];
 

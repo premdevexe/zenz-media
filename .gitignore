@@ -15,5 +15,8 @@
 .DS_Store
 Thumbs.db
 *.log
+*.zip
 .vscode/
 .idea/
+scratch/
+attendance_analytics_deploy_package/

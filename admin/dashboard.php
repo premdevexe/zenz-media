@@ -10,7 +10,11 @@ Security::initSecureSession();
 
 // Check if admin is logged in
 if (!Security::isAuthenticated()) {
-    header("Location: ../admin");
+    if (isset($_SESSION['employee_logged_in']) && $_SESSION['employee_logged_in'] === true) {
+        header("Location: /employee_dashboard");
+        exit();
+    }
+    header("Location: /login.php");
     exit();
 }
 
@@ -26,7 +30,10 @@ $currentPage = 'dashboard';
 
 // Fetch real stats from database
 $totalEmployees = 0;
+$totalPresentToday = 0;
 $presentToday = 0;
+$onTimePresentToday = 0;
+$onLeaveToday = 0;
 $absentToday = 0;
 $lateToday = 0;
 $earlyLeaveToday = 0;
@@ -35,10 +42,21 @@ $pendingLeaves = 0;
 $pendingAadhar = 0;
 $activeTasks = 0;
 $recentAttendance = [];
+$chartDates = [];
+$chartPresent = [];
+$chartLate = [];
 
 $today = date('Y-m-d');
 $monthStart = date('Y-m-01');
 $monthEnd = date('Y-m-t');
+
+// Pre-fill default 7-day windows in case of empty records or exceptions
+for ($i = 6; $i >= 0; $i--) {
+    $d = date('Y-m-d', strtotime("-$i days"));
+    $chartDates[] = date('M d', strtotime($d));
+    $chartPresent[] = 0;
+    $chartLate[] = 0;
+}
 
 // Determine dynamic greeting
 $hour = (int)date('G');
@@ -51,50 +69,125 @@ if ($hour < 12) {
 }
 $adminName = htmlspecialchars($_SESSION['admin_username'] ?? 'Administrator');
 
+// Handle quick toggle action for Employee Panel Index Page
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action']) && $_POST['action'] === 'toggle_employee_index') {
+    $token = $_POST['csrf_token'] ?? '';
+    if (Security::validateCSRFToken($token, 'dashboard_toggle_index')) {
+        $newState = !empty($_POST['employee_index_enabled']) ? 1 : 0;
+        try {
+            $stmt = $pdo->prepare("UPDATE site_settings SET employee_index_enabled = ? WHERE is_active = 1");
+            $stmt->execute([$newState]);
+            if ($stmt->rowCount() === 0) {
+                $pdo->prepare("UPDATE site_settings SET employee_index_enabled = ?")->execute([$newState]);
+            }
+            Security::logAudit($_SESSION['admin_id'] ?? 1, 'toggle_employee_index', 'site_settings', 0, ['employee_index_enabled' => $newState]);
+            $statusText = $newState ? 'turned ON' : 'turned OFF';
+            $_SESSION['dashboard_flash'] = "Employee Panel index page successfully {$statusText}.";
+            $_SESSION['dashboard_flash_type'] = 'success';
+        } catch (PDOException $e) {
+            $_SESSION['dashboard_flash'] = "Database error while updating Employee Panel status.";
+            $_SESSION['dashboard_flash_type'] = 'error';
+        }
+    } else {
+        $_SESSION['dashboard_flash'] = "Invalid security token. Please refresh and try again.";
+        $_SESSION['dashboard_flash_type'] = 'error';
+    }
+    header("Location: dashboard");
+    exit();
+}
+
+$empIndexEnabled = 1;
 try {
-    // 1. Total employees
+    $stmtEmp = $pdo->query("SELECT employee_index_enabled FROM site_settings WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1");
+    if ($rowEmp = $stmtEmp->fetch(PDO::FETCH_ASSOC)) {
+        if (isset($rowEmp['employee_index_enabled'])) {
+            $empIndexEnabled = (int)$rowEmp['employee_index_enabled'];
+        }
+    }
+} catch (PDOException $e) {}
+
+$csrfTokenDashToggle = Security::generateCSRFToken('dashboard_toggle_index');
+
+try {
+    // 1. Total workforce (all registered employees)
     $stmt = $pdo->query("SELECT COUNT(*) FROM employees");
     $totalEmployees = (int)$stmt->fetchColumn();
 
-    // 2. Present Today
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status IN ('present', 'completed', 'half_day') OR status = 'present')");
-    $stmt->execute([$today]);
-    $presentToday = (int)$stmt->fetchColumn();
+    // Active workforce headcount (base for daily attendance & absent calculations)
+    $stmtActive = $pdo->query("SELECT COUNT(*) FROM employees WHERE status = 'active'");
+    $totalActiveEmployees = (int)$stmtActive->fetchColumn();
+    $effectiveHeadcount = $totalActiveEmployees > 0 ? $totalActiveEmployees : $totalEmployees;
 
-    // 3. On Leave Today
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'on_leave' OR status = 'on_leave')");
-    $stmt->execute([$today]);
-    $onLeaveToday = (int)$stmt->fetchColumn();
+    // 2. Today's attendance counts (aggregated directly from attendance table)
+    $stmtToday = $pdo->prepare("
+        SELECT 
+            COUNT(CASE 
+                WHEN (attendance_status IN ('present', 'completed', 'half_day') OR status = 'present' OR check_in IS NOT NULL)
+                     AND (attendance_status != 'delayed' AND status != 'late') 
+                THEN 1 
+            END) as on_time_today,
+            COUNT(CASE 
+                WHEN attendance_status = 'delayed' OR status = 'late' 
+                THEN 1 
+            END) as late_today,
+            COUNT(CASE 
+                WHEN attendance_status = 'left_early' OR early_exit_minutes > 0 
+                THEN 1 
+            END) as early_exit_today
+        FROM attendance
+        WHERE date = ?
+    ");
+    $stmtToday->execute([$today]);
+    $todayMetrics = $stmtToday->fetch(PDO::FETCH_ASSOC);
+
+    $onTimePresentToday = (int)($todayMetrics['on_time_today'] ?? 0);
+    $lateToday = (int)($todayMetrics['late_today'] ?? 0);
+    $totalPresentToday = $onTimePresentToday + $lateToday;
+    $presentToday = $totalPresentToday; // Backward compatibility for KPI cards
+    $earlyLeaveToday = (int)($todayMetrics['early_exit_today'] ?? 0);
+
+    // 3. On Leave Today (Cross-checked from BOTH attendance status AND approved leave requests)
+    $stmtLeave = $pdo->prepare("
+        SELECT COUNT(DISTINCT e.id) 
+        FROM employees e 
+        WHERE e.status = 'active' 
+          AND (
+              EXISTS (SELECT 1 FROM attendance a WHERE a.employee_id = e.id AND a.date = ? AND (a.attendance_status = 'on_leave' OR a.status = 'on_leave'))
+              OR 
+              EXISTS (SELECT 1 FROM leave_requests lr WHERE lr.employee_id = e.id AND lr.status = 'approved' AND ? BETWEEN lr.start_date AND lr.end_date)
+          )
+    ");
+    $stmtLeave->execute([$today, $today]);
+    $onLeaveToday = (int)$stmtLeave->fetchColumn();
     
-    $absentToday = max(0, $totalEmployees - $presentToday - $onLeaveToday);
+    // 4. Absent Today (Active headcount minus anyone who attended or has approved leave)
+    $absentToday = max(0, $effectiveHeadcount - $totalPresentToday - $onLeaveToday);
 
-    // 4. Late Employees Today
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'delayed' OR status = 'late' OR delay_minutes > 0)");
-    $stmt->execute([$today]);
-    $lateToday = (int)$stmt->fetchColumn();
-
-    // 5. Early Leave Today
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'left_early' OR early_exit_minutes > 0)");
-    $stmt->execute([$today]);
-    $earlyLeaveToday = (int)$stmt->fetchColumn();
-
-    // 6. Monthly Attendance Rate
-    $stmt = $pdo->prepare("SELECT attendance_status, status, COUNT(*) as cnt FROM attendance WHERE date BETWEEN ? AND ? GROUP BY attendance_status, status");
-    $stmt->execute([$monthStart, $monthEnd]);
-    $attStats = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    $totalAtt = 0;
-    $presentAtt = 0;
-    foreach ($attStats as $s) {
-        $totalAtt += $s['cnt'];
-        $st = $s['attendance_status'] ?: $s['status'];
-        if (in_array($st, ['present', 'completed', 'half_day', 'delayed', 'late'])) {
-            $presentAtt += $s['cnt'];
+    // 5. Monthly Attendance Efficiency Rate (Dynamically computed from actual database records)
+    $elapsedWorkingDays = 0;
+    $curDay = strtotime($monthStart);
+    $todayTs = strtotime($today);
+    while ($curDay <= $todayTs) {
+        $dayOfWeek = (int)date('N', $curDay);
+        if ($dayOfWeek < 6) { // Mon-Fri business working days
+            $elapsedWorkingDays++;
         }
+        $curDay = strtotime('+1 day', $curDay);
     }
-    $monthlyAttendanceRate = $totalAtt > 0 ? round(($presentAtt / $totalAtt) * 100, 1) : 0;
+    $expectedSlots = max(1, $effectiveHeadcount * max(1, $elapsedWorkingDays));
 
-    // 7. Action Items (Pending Leaves, KYC, Tasks)
+    $stmtMonthAtt = $pdo->prepare("
+        SELECT COUNT(*) 
+        FROM attendance 
+        WHERE date BETWEEN ? AND ? 
+          AND (attendance_status IN ('present', 'completed', 'half_day', 'delayed') OR status IN ('present', 'late') OR check_in IS NOT NULL)
+    ");
+    $stmtMonthAtt->execute([$monthStart, $today]);
+    $actualMonthAttendees = (int)$stmtMonthAtt->fetchColumn();
+    $monthlyAttendanceRate = round(($actualMonthAttendees / $expectedSlots) * 100, 1);
+    $monthlyAttendanceRate = min(100, $monthlyAttendanceRate);
+
+    // 6. Action Items (Pending Leaves, KYC, Tasks)
     $stmtLeaves = $pdo->query("SHOW TABLES LIKE 'leave_requests'");
     if ($stmtLeaves->rowCount() > 0) {
         $pendingLeaves = (int)$pdo->query("SELECT COUNT(*) FROM leave_requests WHERE status = 'pending'")->fetchColumn();
@@ -107,36 +200,95 @@ try {
         $activeTasks = (int)$pdo->query("SELECT COUNT(*) FROM tasks WHERE status IN ('sent', 'in_progress', 'verify')")->fetchColumn();
     }
 
-    // 8. Recent Attendance Activity Feed
-    $stmt = $pdo->query("
+    // 7. Recent Attendance Activity Feed
+    $stmtRecent = $pdo->query("
         SELECT a.*, e.first_name, e.last_name, e.avatar, e.department, e.position, e.employee_id as emp_code
         FROM attendance a
         LEFT JOIN employees e ON a.employee_id = e.id
         ORDER BY a.date DESC, a.check_in DESC
-        LIMIT 6
+        LIMIT 8
     ");
-    $recentAttendance = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $recentAttendance = $stmtRecent->fetchAll(PDO::FETCH_ASSOC);
 
-    // 9. Chart Data: Last 7 Days Attendance
+    // 8. 7-Day Attendance Telemetry (Single high-performance SQL query from attendance table)
+    $startDate = date('Y-m-d', strtotime('-6 days'));
+    $stmt7Days = $pdo->prepare("
+        SELECT 
+            date,
+            COUNT(CASE 
+                WHEN (attendance_status IN ('present', 'completed', 'half_day') OR status = 'present' OR check_in IS NOT NULL)
+                     AND (attendance_status != 'delayed' AND status != 'late') 
+                THEN 1 
+            END) as on_time_count,
+            COUNT(CASE 
+                WHEN attendance_status = 'delayed' OR status = 'late' 
+                THEN 1 
+            END) as delayed_count
+        FROM attendance
+        WHERE date BETWEEN ? AND ?
+        GROUP BY date
+        ORDER BY date ASC
+    ");
+    $stmt7Days->execute([$startDate, $today]);
+    $telemetryDbRows = $stmt7Days->fetchAll(PDO::FETCH_ASSOC);
+
+    $dataByDate = [];
+    foreach ($telemetryDbRows as $r) {
+        $dataByDate[$r['date']] = [
+            'on_time' => (int)$r['on_time_count'],
+            'delayed' => (int)$r['delayed_count']
+        ];
+    }
+
     $chartDates = [];
     $chartPresent = [];
     $chartLate = [];
     for ($i = 6; $i >= 0; $i--) {
         $d = date('Y-m-d', strtotime("-$i days"));
         $chartDates[] = date('M d', strtotime($d));
-        
-        $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status IN ('present', 'completed', 'half_day', 'delayed') OR status IN ('present', 'late'))");
-        $stmt->execute([$d]);
-        $chartPresent[] = (int)$stmt->fetchColumn();
-        
-        $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE date = ? AND (attendance_status = 'delayed' OR delay_minutes > 0)");
-        $stmt->execute([$d]);
-        $chartLate[] = (int)$stmt->fetchColumn();
+        $chartPresent[] = $dataByDate[$d]['on_time'] ?? 0;
+        $chartLate[] = $dataByDate[$d]['delayed'] ?? 0;
+    }
+
+    // Handle JSON API request for live chart telemetry updates
+    if (isset($_GET['action']) && $_GET['action'] === 'chart_telemetry') {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => true,
+            'chartDates' => $chartDates,
+            'chartPresent' => $chartPresent,
+            'chartLate' => $chartLate,
+            'today' => [
+                'onTime' => $onTimePresentToday,
+                'late' => $lateToday,
+                'absent' => $absentToday,
+                'onLeave' => $onLeaveToday,
+                'totalPresent' => $totalPresentToday,
+                'effectiveHeadcount' => $effectiveHeadcount,
+                'totalRegistered' => $totalEmployees
+            ],
+            'kpi' => [
+                'totalEmployees' => $totalEmployees,
+                'totalActiveEmployees' => $totalActiveEmployees,
+                'presentToday' => $totalPresentToday,
+                'absentToday' => $absentToday,
+                'lateToday' => $lateToday,
+                'earlyLeaveToday' => $earlyLeaveToday,
+                'monthlyAttendanceRate' => $monthlyAttendanceRate
+            ],
+            'summary' => [
+                'onTimeSum' => array_sum($chartPresent),
+                'lateSum' => array_sum($chartLate),
+                'totalPunches' => array_sum($chartPresent) + array_sum($chartLate)
+            ]
+        ]);
+        exit();
     }
 
 } catch (PDOException $e) {
     error_log("Dashboard stats error: " . $e->getMessage());
 }
+
 ?>
 
 <?php include __DIR__ . '/header.php'; ?>
@@ -283,47 +435,6 @@ try {
         50% { transform: scale(1.25); opacity: 0.7; }
     }
 
-    .dash-action-buttons {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-    }
-
-    .btn-dash-action {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 10px 18px;
-        border-radius: var(--adm-radius-md);
-        font-family: inherit;
-        font-size: 0.88rem;
-        font-weight: 700;
-        text-decoration: none;
-        cursor: pointer;
-        transition: all var(--adm-transition);
-        border: 1px solid var(--adm-border);
-        background: var(--adm-surface);
-        color: var(--adm-text-body);
-        box-shadow: var(--adm-shadow-sm);
-    }
-    .btn-dash-action:hover {
-        transform: translateY(-2px);
-        box-shadow: var(--adm-shadow-hover);
-        color: var(--adm-brand);
-        border-color: var(--adm-brand-border);
-    }
-    .btn-dash-action.primary {
-        background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
-        color: #ffffff;
-        border: none;
-        box-shadow: 0 4px 14px rgba(79, 70, 229, 0.3);
-    }
-    .btn-dash-action.primary:hover {
-        background: linear-gradient(135deg, #4338ca 0%, #4f46e5 100%);
-        box-shadow: 0 8px 20px rgba(79, 70, 229, 0.4);
-    }
-
     /* ── Action Required Insights Banners ── */
     .insights-grid {
         display: grid;
@@ -412,129 +523,152 @@ try {
         border-color: var(--adm-brand);
     }
 
-    /* ── Metric Cards Grid ── */
+    /* ── Primary Summary Metrics Cards (Exact Employee Directory Component Design) ── */
+    .emp-kpi-grid,
     .cards-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 20px;
-        margin-bottom: 32px;
+        display: grid !important;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)) !important;
+        gap: 16px !important;
+        margin-bottom: 24px !important;
     }
 
+    .emp-kpi-card,
     .dash-card {
-        background: var(--adm-surface-card);
-        border: 1px solid var(--adm-border);
-        border-radius: var(--adm-radius-xl);
-        padding: 24px;
-        box-shadow: var(--adm-shadow-card);
-        transition: transform var(--adm-transition), box-shadow var(--adm-transition), border-color var(--adm-transition);
-        position: relative;
-        overflow: hidden;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
+        background: var(--adm-surface) !important;
+        border: 1px solid var(--adm-border) !important;
+        border-radius: var(--adm-radius-lg) !important;
+        padding: 20px !important;
+        box-shadow: var(--adm-shadow-card) !important;
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: flex-start !important;
+        justify-content: space-between !important;
+        text-align: left !important;
+        position: relative !important;
+        overflow: hidden !important;
+        transition: all var(--adm-transition) !important;
+        cursor: pointer !important;
+        box-sizing: border-box !important;
     }
+
+    .emp-kpi-card:hover,
     .dash-card:hover {
-        transform: translateY(-4px);
-        box-shadow: var(--adm-shadow-hover);
-        border-color: var(--adm-brand-border);
+        transform: translateY(-3px) !important;
+        box-shadow: var(--adm-shadow-hover) !important;
+        border-color: var(--adm-brand-border) !important;
     }
 
-    .dash-card-top {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 16px;
+    /* 3px Top Accent Stripe matching Employee Directory */
+    .emp-kpi-card::before,
+    .dash-card::before {
+        content: '' !important;
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
+        height: 3px !important;
+        background: transparent;
+        transition: background var(--adm-transition);
     }
 
-    .dash-card-icon {
-        width: 48px;
-        height: 48px;
-        border-radius: var(--adm-radius-md);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 1.25rem;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.06);
-        transition: transform var(--adm-transition);
-    }
-    .dash-card:hover .dash-card-icon {
-        transform: scale(1.08);
+    .emp-kpi-card.kpi-workforce::before,
+    .dash-card--workforce::before { background: linear-gradient(90deg, #4f46e5, #7c3aed) !important; }
+
+    .emp-kpi-card.kpi-present::before,
+    .dash-card--present::before { background: linear-gradient(90deg, #059669, #10b981) !important; }
+
+    .emp-kpi-card.kpi-absent::before,
+    .dash-card--absent::before { background: linear-gradient(90deg, #e11d48, #f43f5e) !important; }
+
+    .emp-kpi-card.kpi-late::before,
+    .dash-card--late::before { background: linear-gradient(90deg, #d97706, #f59e0b) !important; }
+
+    .emp-kpi-card.kpi-early::before,
+    .dash-card--early::before { background: linear-gradient(90deg, #8b5cf6, #a855f7) !important; }
+
+    .emp-kpi-card.kpi-rate::before,
+    .dash-card--rate::before { background: linear-gradient(90deg, #2563eb, #06b6d4) !important; }
+
+    /* Left Info Column */
+    .emp-kpi-info,
+    .dash-card-info {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 4px !important;
+        min-width: 0 !important;
+        text-align: left !important;
     }
 
-    .dash-card-icon--blue   { background: var(--adm-brand-light); color: var(--adm-brand); }
-    .dash-card-icon--green  { background: var(--adm-success-light); color: var(--adm-success); }
-    .dash-card-icon--orange { background: var(--adm-warning-light); color: var(--adm-warning); }
-    .dash-card-icon--purple { background: rgba(139, 92, 246, 0.16); color: #8b5cf6; }
-
-    .dash-card-chip {
-        font-size: 0.72rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        padding: 3px 8px;
-        border-radius: var(--adm-radius-pill);
-        background: var(--adm-surface-subtle);
-        color: var(--adm-faint);
-        border: 1px solid var(--adm-border-subtle);
-    }
-    .dash-card-chip.success {
-        background: var(--adm-success-light);
-        color: var(--adm-success);
-        border-color: rgba(5, 150, 105, 0.3);
-    }
-    .dash-card-chip.danger {
-        background: var(--adm-danger-light);
-        color: var(--adm-danger);
-        border-color: var(--adm-danger-border);
+    .emp-kpi-label,
+    .dash-card-label {
+        font-size: 0.8rem !important;
+        font-weight: 700 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.04em !important;
+        color: var(--adm-muted) !important;
+        margin: 0 !important;
+        line-height: 1.2 !important;
     }
 
-    .dash-card-title {
-        font-size: 0.85rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        color: var(--adm-muted);
-        margin-bottom: 6px;
-    }
-
+    .emp-kpi-value,
     .dash-card-value {
-        font-family: 'Outfit', sans-serif;
-        font-size: 2.1rem;
-        font-weight: 800;
-        color: var(--adm-text-main);
-        line-height: 1.1;
-        letter-spacing: -0.02em;
-        margin-bottom: 8px;
+        font-family: 'Outfit', sans-serif !important;
+        font-size: 1.75rem !important;
+        font-weight: 800 !important;
+        color: var(--adm-text-main) !important;
+        line-height: 1.1 !important;
+        margin: 0 !important;
     }
 
-    .dash-card-subtext {
-        font-size: 0.8rem;
-        color: var(--adm-faint);
-        display: flex;
-        align-items: center;
-        gap: 6px;
+    .emp-kpi-sub,
+    .dash-card-sub {
+        font-size: 0.78rem !important;
+        color: var(--adm-faint) !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 5px !important;
+        margin-top: 2px !important;
+        line-height: 1.2 !important;
     }
 
-    .dash-mini-progress {
-        height: 6px;
-        background: var(--adm-surface-subtle);
-        border-radius: var(--adm-radius-pill);
-        overflow: hidden;
-        margin-top: 10px;
-    }
-    .dash-mini-progress-fill {
-        height: 100%;
-        background: linear-gradient(90deg, #10b981, #059669);
-        border-radius: var(--adm-radius-pill);
-        transition: width 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+    /* Right Icon Badge (44x44, radius-md) */
+    .emp-kpi-icon,
+    .dash-card-icon {
+        width: 44px !important;
+        height: 44px !important;
+        border-radius: var(--adm-radius-md) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-size: 1.25rem !important;
+        flex-shrink: 0 !important;
+        margin: 0 !important;
     }
 
-    /* ── Analytics & Visual Charts Grid ── */
+    .dash-card-icon--blue,
+    .emp-kpi-card.kpi-workforce .emp-kpi-icon { background: var(--adm-brand-light) !important; color: var(--adm-brand) !important; }
+
+    .dash-card-icon--green,
+    .emp-kpi-card.kpi-present .emp-kpi-icon { background: var(--adm-success-light) !important; color: var(--adm-success) !important; }
+
+    .dash-card-icon--red,
+    .emp-kpi-card.kpi-absent .emp-kpi-icon { background: var(--adm-danger-light) !important; color: var(--adm-danger) !important; }
+
+    .dash-card-icon--orange,
+    .emp-kpi-card.kpi-late .emp-kpi-icon { background: var(--adm-warning-light) !important; color: var(--adm-warning) !important; }
+
+    .dash-card-icon--purple,
+    .emp-kpi-card.kpi-early .emp-kpi-icon { background: rgba(139, 92, 246, 0.16) !important; color: #8b5cf6 !important; }
+
+    .dash-card-icon--cyan,
+    .emp-kpi-card.kpi-rate .emp-kpi-icon { background: rgba(37, 99, 235, 0.12) !important; color: #2563eb !important; }
+
+    /* ── Analytics & Visual Charts Grid (Compact Layout) ── */
     .charts-grid-layout {
         display: grid;
         grid-template-columns: 1.85fr 1fr;
-        gap: 24px;
-        margin-bottom: 32px;
+        gap: 16px;
+        margin-bottom: 20px;
         min-width: 0;
         max-width: 100%;
     }
@@ -546,8 +680,8 @@ try {
     .chart-panel-card {
         background: var(--adm-surface-card);
         border: 1px solid var(--adm-border);
-        border-radius: var(--adm-radius-xl);
-        padding: 28px;
+        border-radius: var(--adm-radius-lg);
+        padding: 16px 20px;
         box-shadow: var(--adm-shadow-card);
         transition: border-color 0.3s ease, box-shadow 0.3s ease;
         position: relative;
@@ -563,28 +697,28 @@ try {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        margin-bottom: 24px;
-        padding-bottom: 16px;
+        margin-bottom: 12px;
+        padding-bottom: 10px;
         border-bottom: 1px solid var(--adm-border-subtle);
     }
 
     .chart-panel-title {
         font-family: 'Outfit', sans-serif;
-        font-size: 1.25rem;
+        font-size: 1.08rem;
         font-weight: 700;
         color: var(--adm-text-main);
         letter-spacing: -0.01em;
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
     }
     .chart-panel-title i {
         color: var(--adm-brand);
-        font-size: 1.1rem;
+        font-size: 1.05rem;
     }
 
     .chart-panel-desc {
-        font-size: 0.84rem;
+        font-size: 0.80rem;
         color: var(--adm-muted);
         margin-top: 2px;
     }
@@ -592,7 +726,8 @@ try {
     .chart-canvas-container {
         position: relative;
         width: 100%;
-        height: 280px;
+        height: 240px;
+        min-height: 240px;
     }
 
     /* ── Live Attendance Activity Table ── */
@@ -708,9 +843,8 @@ try {
     }
     @media (max-width: 768px) {
         .dash-hero-header { flex-direction: column; align-items: flex-start; }
-        .dash-action-buttons { width: 100%; }
-        .btn-dash-action { flex: 1; justify-content: center; }
-        .cards-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+        .emp-kpi-grid,
+        .cards-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)) !important; gap: 14px !important; }
         .chart-panel-card { padding: 20px 16px; }
         .feed-panel-card { padding: 20px 16px; overflow-x: auto; }
         .insights-grid { grid-template-columns: 1fr; }
@@ -720,7 +854,8 @@ try {
         .insights-grid { grid-template-columns: 1fr; margin-bottom: 20px; }
         .insight-card { padding: 12px; flex-direction: column; align-items: flex-start; gap: 10px; }
         .insight-btn { width: 100%; justify-content: center; }
-        .cards-grid { grid-template-columns: 1fr; gap: 12px; margin-bottom: 24px; }
+        .emp-kpi-grid,
+        .cards-grid { grid-template-columns: 1fr !important; gap: 12px !important; margin-bottom: 24px !important; }
         .chart-panel-card { padding: 16px 12px; }
         .chart-panel-header { flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 16px; }
         .feed-panel-card { padding: 16px 12px; }
@@ -738,38 +873,83 @@ try {
             <span style="font-size: 1.4rem;">👋</span>
         </h1>
         <div class="dash-greeting-subtitle">
-            <span>Enterprise workforce &amp; operations telemetry overview</span>
-            <span style="color: var(--adm-faint);">&bull;</span>
             <div class="live-clock-pill">
                 <span class="pulse-green"></span>
                 <span id="liveClockDisplay"><?php echo date('l, M d, Y &bull; h:i:s A'); ?></span>
             </div>
         </div>
     </div>
+</div>
 
-    <!-- Quick Action Shortcut Buttons -->
-    <div class="dash-action-buttons">
-        <a href="employee" class="btn-dash-action primary" title="Add and manage employees">
-            <i class="fa-solid fa-user-plus icon-anim-sparkle"></i>
-            <span>Manage Workforce</span>
+<!-- ─── Flash Feedback Notification ─── -->
+<?php if (!empty($_SESSION['dashboard_flash'])): ?>
+    <div class="alert animate-up" style="margin-bottom: 20px; display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-radius: 12px; background: <?php echo ($_SESSION['dashboard_flash_type'] ?? '') === 'success' ? 'rgba(5, 150, 105, 0.1)' : 'rgba(225, 29, 72, 0.1)'; ?>; border: 1px solid <?php echo ($_SESSION['dashboard_flash_type'] ?? '') === 'success' ? '#059669' : '#e11d48'; ?>; color: <?php echo ($_SESSION['dashboard_flash_type'] ?? '') === 'success' ? '#059669' : '#e11d48'; ?>; font-weight: 600;">
+        <i class="fa-solid <?php echo ($_SESSION['dashboard_flash_type'] ?? '') === 'success' ? 'fa-circle-check' : 'fa-triangle-exclamation'; ?>" style="font-size: 1.15rem;"></i>
+        <span><?php echo htmlspecialchars($_SESSION['dashboard_flash']); ?></span>
+    </div>
+    <?php unset($_SESSION['dashboard_flash'], $_SESSION['dashboard_flash_type']); ?>
+<?php endif; ?>
+
+<!-- ─── Employee Panel Index Access Control Banner ─── -->
+<div class="dash-portal-status-banner animate-up" style="background: var(--adm-surface); border: 1px solid var(--adm-border); border-radius: var(--adm-radius-lg); padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; margin-bottom: 24px; box-shadow: var(--adm-shadow-sm);">
+    <div style="display: flex; align-items: center; gap: 12px;">
+        <div style="width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; background: <?php echo $empIndexEnabled ? 'rgba(5, 150, 105, 0.12)' : 'rgba(225, 29, 72, 0.12)'; ?>; color: <?php echo $empIndexEnabled ? 'var(--adm-success)' : 'var(--adm-danger)'; ?>;">
+            <i class="fa-solid fa-power-off"></i>
+        </div>
+        <div>
+            <div style="font-weight: 700; font-size: 0.95rem; color: var(--adm-text-main); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <span>Employee Panel Index Page:</span>
+                <?php if ($empIndexEnabled): ?>
+                    <span class="badge-status present" style="font-weight: 700; padding: 2px 10px; border-radius: 9999px; font-size: 0.76rem; display: inline-flex; align-items: center; gap: 4px;">
+                        <span class="pulse-green" style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--adm-success);"></span>
+                        ON &bull; Live Access
+                    </span>
+                <?php else: ?>
+                    <span class="badge-status absent" style="font-weight: 700; padding: 2px 10px; border-radius: 9999px; font-size: 0.76rem; display: inline-flex; align-items: center; gap: 4px;">
+                        <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--adm-danger);"></span>
+                        OFF &bull; Offline Notice
+                    </span>
+                <?php endif; ?>
+            </div>
+            <div style="font-size: 0.78rem; color: var(--adm-muted); margin-top: 3px;">
+                <?php if ($empIndexEnabled): ?>
+                    Employees and public visitors can access the index page normally.
+                <?php else: ?>
+                    Employee access to the index page is blocked with a clean offline notice. Admin Panel is unaffected.
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <form method="POST" action="" style="margin: 0; display: inline;">
+            <input type="hidden" name="action" value="toggle_employee_index">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrfTokenDashToggle); ?>">
+            <input type="hidden" name="employee_index_enabled" value="<?php echo $empIndexEnabled ? '0' : '1'; ?>">
+            <button type="submit" class="btn-dash-action" style="padding: 8px 16px; font-size: 0.82rem; font-weight: 700; cursor: pointer; border-radius: var(--adm-radius-md); background: <?php echo $empIndexEnabled ? '#e11d48' : '#059669'; ?>; color: #fff; border: none; display: inline-flex; align-items: center; gap: 6px;">
+                <i class="fa-solid fa-power-off"></i>
+                <span><?php echo $empIndexEnabled ? 'Turn OFF' : 'Turn ON'; ?></span>
+            </button>
+        </form>
+        <a href="site_settings" class="btn-dash-action" style="padding: 8px 12px; font-size: 0.82rem; color: var(--adm-text-body); background: var(--adm-surface-subtle); border: 1px solid var(--adm-border); border-radius: var(--adm-radius-md); text-decoration: none; display: inline-flex; align-items: center; gap: 5px;" title="Full Settings Configuration">
+            <i class="fa-solid fa-sliders"></i>
+            <span>Settings</span>
         </a>
-        <a href="attendance" class="btn-dash-action" title="View live attendance log">
-            <i class="fa-solid fa-calendar-check icon-anim-pulse"></i>
-            <span>Attendance Log</span>
+        <a href="/" target="_blank" class="btn-dash-action" style="padding: 8px 12px; font-size: 0.82rem; color: var(--adm-text-body); background: var(--adm-surface-subtle); border: 1px solid var(--adm-border); border-radius: var(--adm-radius-md); text-decoration: none; display: inline-flex; align-items: center; gap: 5px;" title="Test Employee Index Page">
+            <i class="fa-solid fa-arrow-up-right-from-square"></i>
+            <span>View Site</span>
         </a>
-        <a href="reports" class="btn-dash-action" title="Generate compliance report">
-            <i class="fa-solid fa-file-export icon-anim-float"></i>
-            <span>Export Reports</span>
-        </a>
+        <?php if (!$empIndexEnabled): ?>
+            <a href="/?preview=1" target="_blank" class="btn-dash-action" style="padding: 8px 12px; font-size: 0.82rem; color: var(--adm-text-body); background: var(--adm-surface-subtle); border: 1px solid var(--adm-border); border-radius: var(--adm-radius-md); text-decoration: none; display: inline-flex; align-items: center; gap: 5px;" title="Preview Index Page as Administrator">
+                <i class="fa-solid fa-eye"></i>
+                <span>Preview</span>
+            </a>
+        <?php endif; ?>
     </div>
 </div>
 
-<!-- ========================================
-     SMART INSIGHTS / ACTION BANNERS
-     ======================================== -->
 <?php if ($pendingLeaves > 0 || $pendingAadhar > 0): ?>
     <div class="insights-grid animate-up stagger-1">
-        <?php if ($pendingLeaves > 0): ?>
+        <?php if ($pendingLeaves > 0 && Security::hasPermission('leaves.view', $currentAdminId)): ?>
             <div class="insight-card warning">
                 <div class="insight-left">
                     <div class="insight-icon-wrap">
@@ -787,7 +967,7 @@ try {
             </div>
         <?php endif; ?>
 
-        <?php if ($pendingAadhar > 0): ?>
+        <?php if ($pendingAadhar > 0 && Security::hasPermission('employees.view', $currentAdminId)): ?>
             <div class="insight-card info">
                 <div class="insight-left">
                     <div class="insight-icon-wrap">
@@ -808,121 +988,79 @@ try {
 <?php endif; ?>
 
 <!-- ========================================
-     PRIMARY KPI STAT CARDS (Animated)
+     PRIMARY KPI STAT CARDS (Exact Employee Directory Component Design)
      ======================================== -->
-<div class="cards-grid">
+<div class="emp-kpi-grid cards-grid">
     
     <!-- 1. Total Workforce -->
-    <div class="dash-card animate-up stagger-1" onclick="window.location.href='employee'" style="cursor: pointer;" title="View all employees">
-        <div>
-            <div class="dash-card-top">
-                <div class="dash-card-icon dash-card-icon--blue">
-                    <i class="fa-solid fa-users icon-anim-float"></i>
-                </div>
-                <span class="dash-card-chip">Registered</span>
-            </div>
-            <p class="dash-card-title">Total Workforce</p>
-            <p class="dash-card-value"><?php echo number_format($totalEmployees); ?></p>
+    <div class="emp-kpi-card kpi-workforce dash-card dash-card--workforce animate-up stagger-1" onclick="window.location.href='employee'" style="cursor: pointer;" title="View all employees">
+        <div class="emp-kpi-info dash-card-info">
+            <span class="emp-kpi-label dash-card-label">Total Workforce</span>
+            <span class="emp-kpi-value dash-card-value"><?php echo number_format($totalEmployees); ?></span>
+            <span class="emp-kpi-sub dash-card-sub"><i class="fa-solid fa-users"></i> Registered members</span>
         </div>
-        <div class="dash-card-subtext">
-            <i class="fa-solid fa-building-user" style="color: var(--adm-brand);"></i>
-            <span>Active corporate team</span>
+        <div class="emp-kpi-icon dash-card-icon dash-card-icon--blue">
+            <i class="fa-solid fa-users"></i>
         </div>
     </div>
 
     <!-- 2. Present Today -->
-    <div class="dash-card animate-up stagger-2" onclick="window.location.href='attendance'" style="cursor: pointer;" title="View present employees today">
-        <div>
-            <div class="dash-card-top">
-                <div class="dash-card-icon dash-card-icon--green">
-                    <i class="fa-solid fa-user-check icon-anim-bounce"></i>
-                </div>
-                <span class="dash-card-chip success">
-                    <?php echo $totalEmployees > 0 ? round(($presentToday / $totalEmployees) * 100) : 0; ?>% Ratio
-                </span>
-            </div>
-            <p class="dash-card-title">Present Today</p>
-            <p class="dash-card-value"><?php echo number_format($presentToday); ?></p>
+    <div class="emp-kpi-card kpi-present dash-card dash-card--present animate-up stagger-2" onclick="window.location.href='attendance'" style="cursor: pointer;" title="View present employees today">
+        <div class="emp-kpi-info dash-card-info">
+            <span class="emp-kpi-label dash-card-label">Present Today</span>
+            <span class="emp-kpi-value dash-card-value"><?php echo number_format($presentToday); ?></span>
+            <span class="emp-kpi-sub dash-card-sub"><i class="fa-solid fa-user-check"></i> On-site & WFH</span>
         </div>
-        <div class="dash-card-subtext">
-            <i class="fa-solid fa-circle" style="font-size: 0.55rem; color: var(--adm-success);"></i>
-            <span>Checked in &bull; On duty</span>
+        <div class="emp-kpi-icon dash-card-icon dash-card-icon--green">
+            <i class="fa-solid fa-user-check"></i>
         </div>
     </div>
 
     <!-- 3. Absent Today -->
-    <div class="dash-card animate-up stagger-3" onclick="window.location.href='attendance'" style="cursor: pointer;" title="View absent employees">
-        <div>
-            <div class="dash-card-top">
-                <div class="dash-card-icon" style="background: var(--adm-danger-light); color: var(--adm-danger);">
-                    <i class="fa-solid fa-user-xmark icon-anim-pulse"></i>
-                </div>
-                <span class="dash-card-chip danger">Absent</span>
-            </div>
-            <p class="dash-card-title">Absent Today</p>
-            <p class="dash-card-value"><?php echo number_format($absentToday); ?></p>
+    <div class="emp-kpi-card kpi-absent dash-card dash-card--absent animate-up stagger-3" onclick="window.location.href='attendance'" style="cursor: pointer;" title="View absent employees">
+        <div class="emp-kpi-info dash-card-info">
+            <span class="emp-kpi-label dash-card-label">Absent Today</span>
+            <span class="emp-kpi-value dash-card-value"><?php echo number_format($absentToday); ?></span>
+            <span class="emp-kpi-sub dash-card-sub"><i class="fa-solid fa-user-xmark"></i> Not checked in</span>
         </div>
-        <div class="dash-card-subtext">
-            <i class="fa-solid fa-circle-exclamation" style="color: var(--adm-danger);"></i>
-            <span>Not logged in today</span>
+        <div class="emp-kpi-icon dash-card-icon dash-card-icon--red">
+            <i class="fa-solid fa-user-xmark"></i>
         </div>
     </div>
 
     <!-- 4. Late Today -->
-    <div class="dash-card animate-up stagger-4" onclick="window.location.href='attendance'" style="cursor: pointer;" title="View delayed arrivals">
-        <div>
-            <div class="dash-card-top">
-                <div class="dash-card-icon dash-card-icon--orange">
-                    <i class="fa-solid fa-clock icon-anim-spin"></i>
-                </div>
-                <span class="dash-card-chip" style="background: var(--adm-warning-light); color: var(--adm-warning);">Delayed</span>
-            </div>
-            <p class="dash-card-title">Late Today</p>
-            <p class="dash-card-value"><?php echo number_format($lateToday); ?></p>
+    <div class="emp-kpi-card kpi-late dash-card dash-card--late animate-up stagger-4" onclick="window.location.href='attendance'" style="cursor: pointer;" title="View delayed arrivals">
+        <div class="emp-kpi-info dash-card-info">
+            <span class="emp-kpi-label dash-card-label">Late Today</span>
+            <span class="emp-kpi-value dash-card-value"><?php echo number_format($lateToday); ?></span>
+            <span class="emp-kpi-sub dash-card-sub"><i class="fa-solid fa-clock"></i> Delayed punch-in</span>
         </div>
-        <div class="dash-card-subtext">
-            <i class="fa-solid fa-hourglass-end" style="color: var(--adm-warning);"></i>
-            <span>Grace period exceeded</span>
+        <div class="emp-kpi-icon dash-card-icon dash-card-icon--orange">
+            <i class="fa-solid fa-clock"></i>
         </div>
     </div>
 
     <!-- 5. Early Leave Today -->
-    <div class="dash-card animate-up stagger-5" onclick="window.location.href='attendance'" style="cursor: pointer;" title="View early departures">
-        <div>
-            <div class="dash-card-top">
-                <div class="dash-card-icon dash-card-icon--purple">
-                    <i class="fa-solid fa-person-walking-arrow-right icon-anim-bounce"></i>
-                </div>
-                <span class="dash-card-chip">Early Exit</span>
-            </div>
-            <p class="dash-card-title">Early Departures</p>
-            <p class="dash-card-value"><?php echo number_format($earlyLeaveToday); ?></p>
+    <div class="emp-kpi-card kpi-early dash-card dash-card--early animate-up stagger-5" onclick="window.location.href='attendance'" style="cursor: pointer;" title="View early departures">
+        <div class="emp-kpi-info dash-card-info">
+            <span class="emp-kpi-label dash-card-label">Early Departures</span>
+            <span class="emp-kpi-value dash-card-value"><?php echo number_format($earlyLeaveToday); ?></span>
+            <span class="emp-kpi-sub dash-card-sub"><i class="fa-solid fa-person-walking-arrow-right"></i> Before shift end</span>
         </div>
-        <div class="dash-card-subtext">
-            <i class="fa-solid fa-right-from-bracket" style="color: #8b5cf6;"></i>
-            <span>Clocked out early</span>
+        <div class="emp-kpi-icon dash-card-icon dash-card-icon--purple">
+            <i class="fa-solid fa-person-walking-arrow-right"></i>
         </div>
     </div>
 
     <!-- 6. Monthly Attendance Efficiency -->
-    <div class="dash-card animate-up stagger-6" onclick="window.location.href='reports'" style="cursor: pointer;" title="View monthly attendance rate">
-        <div>
-            <div class="dash-card-top">
-                <div class="dash-card-icon" style="background: var(--adm-success-light); color: var(--adm-success);">
-                    <i class="fa-solid fa-chart-line icon-anim-sparkle"></i>
-                </div>
-                <span class="dash-card-chip success"><?php echo date('M Y'); ?></span>
-            </div>
-            <p class="dash-card-title">Monthly Efficiency</p>
-            <p class="dash-card-value"><?php echo $monthlyAttendanceRate; ?>%</p>
+    <div class="emp-kpi-card kpi-rate dash-card dash-card--rate animate-up stagger-6" onclick="window.location.href='reports'" style="cursor: pointer;" title="View monthly attendance rate">
+        <div class="emp-kpi-info dash-card-info">
+            <span class="emp-kpi-label dash-card-label">Monthly Efficiency</span>
+            <span class="emp-kpi-value dash-card-value"><?php echo $monthlyAttendanceRate; ?>%</span>
+            <span class="emp-kpi-sub dash-card-sub"><i class="fa-solid fa-chart-line"></i> Overall rate</span>
         </div>
-        <div>
-            <div class="dash-mini-progress">
-                <div class="dash-mini-progress-fill" style="width: <?php echo min(100, max(0, $monthlyAttendanceRate)); ?>%;"></div>
-            </div>
-            <div class="dash-card-subtext" style="margin-top: 6px;">
-                <span>Monthly completion metric</span>
-            </div>
+        <div class="emp-kpi-icon dash-card-icon dash-card-icon--cyan">
+            <i class="fa-solid fa-chart-line"></i>
         </div>
     </div>
 
@@ -949,6 +1087,21 @@ try {
         <div class="chart-canvas-container">
             <canvas id="attendanceChart"></canvas>
         </div>
+
+        <!-- Telemetry Summary Row -->
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--adm-border-subtle); font-size: 0.80rem; color: var(--adm-muted); flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #10b981;"></span>
+                <span>On-time: <strong style="color: var(--adm-text-main);"><?php echo array_sum($chartPresent); ?></strong></span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #f59e0b;"></span>
+                <span>Delayed: <strong style="color: var(--adm-text-main);"><?php echo array_sum($chartLate); ?></strong></span>
+            </div>
+            <div>
+                <span>7-Day Total: <strong style="color: var(--adm-text-main);"><?php echo array_sum($chartPresent) + array_sum($chartLate); ?> punches</strong></span>
+            </div>
+        </div>
     </div>
 
     <!-- Today's Attendance Composition Doughnut Chart -->
@@ -961,10 +1114,39 @@ try {
                 </h2>
                 <p class="chart-panel-desc">Present, absent, and delayed distribution.</p>
             </div>
+            <span class="dash-card-chip" style="font-size: 0.75rem;"><?php echo $totalPresentToday; ?> / <?php echo $effectiveHeadcount; ?> Present</span>
         </div>
 
-        <div class="chart-canvas-container" style="display: flex; align-items: center; justify-content: center;">
+        <div class="chart-canvas-container" style="position: relative;">
             <canvas id="todayChart"></canvas>
+            <div id="todayChartCenter" style="position: absolute; top: 43%; left: 50%; transform: translate(-50%, -50%); text-align: center; pointer-events: none;">
+                <div style="font-family: 'Outfit', sans-serif; font-size: 1.45rem; font-weight: 800; color: var(--adm-text-main); line-height: 1.1;">
+                    <?php echo $totalPresentToday; ?>/<?php echo $effectiveHeadcount; ?>
+                </div>
+                <div style="font-size: 0.70rem; font-weight: 700; color: var(--adm-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px;">
+                    Present
+                </div>
+            </div>
+        </div>
+
+        <!-- Metric Badges Breakdown -->
+        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--adm-border-subtle); text-align: center;">
+            <div style="padding: 6px 2px; background: rgba(16, 185, 129, 0.08); border-radius: 8px; border: 1px solid rgba(16, 185, 129, 0.2);">
+                <div style="font-size: 0.68rem; font-weight: 700; color: #10b981; text-transform: uppercase;">On-time</div>
+                <div style="font-size: 1.05rem; font-weight: 800; color: var(--adm-text-main); margin-top: 2px;"><?php echo $onTimePresentToday; ?></div>
+            </div>
+            <div style="padding: 6px 2px; background: rgba(245, 158, 11, 0.08); border-radius: 8px; border: 1px solid rgba(245, 158, 11, 0.2);">
+                <div style="font-size: 0.68rem; font-weight: 700; color: #f59e0b; text-transform: uppercase;">Late</div>
+                <div style="font-size: 1.05rem; font-weight: 800; color: var(--adm-text-main); margin-top: 2px;"><?php echo $lateToday; ?></div>
+            </div>
+            <div style="padding: 6px 2px; background: rgba(239, 68, 68, 0.08); border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.2);">
+                <div style="font-size: 0.68rem; font-weight: 700; color: #ef4444; text-transform: uppercase;">Absent</div>
+                <div style="font-size: 1.05rem; font-weight: 800; color: var(--adm-text-main); margin-top: 2px;"><?php echo $absentToday; ?></div>
+            </div>
+            <div style="padding: 6px 2px; background: rgba(99, 102, 241, 0.08); border-radius: 8px; border: 1px solid rgba(99, 102, 241, 0.2);">
+                <div style="font-size: 0.68rem; font-weight: 700; color: #6366f1; text-transform: uppercase;">Leave</div>
+                <div style="font-size: 1.05rem; font-weight: 800; color: var(--adm-text-main); margin-top: 2px;"><?php echo $onLeaveToday; ?></div>
+            </div>
         </div>
     </div>
 
@@ -1004,10 +1186,16 @@ try {
                 <tbody>
                     <?php foreach ($recentAttendance as $row): 
                         $empName = trim(($row['first_name'] ?? '') . ' ' . ($row['last_name'] ?? '')) ?: 'Employee';
-                        $empInitials = strtoupper(substr($row['first_name'] ?? 'E', 0, 1) . substr($row['last_name'] ?? 'M', 0, 1));
+                        $fName = trim($row['first_name'] ?? '');
+                        $lName = trim($row['last_name'] ?? '');
+                        $empInitials = strtoupper(substr($fName ?: 'E', 0, 1) . substr($lName ?: '', 0, 1));
+                        if (strlen($empInitials) === 1) {
+                            $empInitials = strtoupper(substr($fName ?: 'EM', 0, 2));
+                        }
                         $checkInDisplay = !empty($row['check_in']) ? date('h:i A', strtotime($row['check_in'])) : '—';
                         $checkOutDisplay = !empty($row['check_out']) ? date('h:i A', strtotime($row['check_out'])) : 'Active';
                         $attStatus = strtolower($row['attendance_status'] ?: ($row['status'] ?: 'present'));
+                        $deptDisplay = !empty($row['department']) ? $row['department'] : '—';
                     ?>
                         <tr>
                             <td>
@@ -1023,7 +1211,7 @@ try {
                                     </div>
                                 </div>
                             </td>
-                            <td><?php echo htmlspecialchars($row['department'] ?: 'Operations'); ?></td>
+                            <td><?php echo htmlspecialchars($deptDisplay); ?></td>
                             <td><?php echo date('M d, Y', strtotime($row['date'])); ?></td>
                             <td>
                                 <span style="font-weight: 600; color: var(--adm-text-main);">
@@ -1063,12 +1251,21 @@ try {
     <?php endif; ?>
 </div>
 
-<!-- Chart.js Library -->
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<!-- Chart.js Library (Local + CDN Fallback) -->
+<script src="/assets/js/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+if (typeof Chart === 'undefined') {
+    document.write('<script src="../assets/js/chart.umd.min.js"><\/script>');
+}
+if (typeof Chart === 'undefined') {
+    document.write('<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"><\/script>');
+}
+</script>
 
 <!-- Dynamic Theme-Adaptive Chart & Live Clock Script -->
 <script>
-document.addEventListener('DOMContentLoaded', function() {
+(function() {
     // ── Live Clock Ticker ──
     const clockEl = document.getElementById('liveClockDisplay');
     function updateLiveClock() {
@@ -1086,149 +1283,182 @@ document.addEventListener('DOMContentLoaded', function() {
         };
         clockEl.innerHTML = now.toLocaleDateString('en-US', options);
     }
+    updateLiveClock();
     setInterval(updateLiveClock, 1000);
 
-    // ── Chart.js Theme Adaptive Helper ──
-    const htmlRoot = document.documentElement;
+    function initDashboardCharts() {
+        // Ensure Chart.js is loaded
+        if (typeof Chart === 'undefined') {
+            setTimeout(initDashboardCharts, 150);
+            return;
+        }
 
-    function getChartThemeColors() {
-        const isDark = htmlRoot.getAttribute('data-theme') === 'dark';
-        return {
-            textColor: isDark ? '#94a3b8' : '#64748b',
-            gridColor: isDark ? 'rgba(255, 255, 255, 0.07)' : 'rgba(0, 0, 0, 0.05)',
-            barPresent: '#10b981',
-            barLate: '#f59e0b',
-            donutColors: ['#10b981', '#ef4444', '#f59e0b', '#8b5cf6']
-        };
-    }
+        // ── Chart.js Theme Adaptive Helper ──
+        const htmlRoot = document.documentElement;
 
-    let colors = getChartThemeColors();
+        function getChartThemeColors() {
+            const isDark = htmlRoot.getAttribute('data-theme') === 'dark';
+            return {
+                isDark: isDark,
+                textColor: isDark ? '#94a3b8' : '#64748b',
+                gridColor: isDark ? 'rgba(255, 255, 255, 0.07)' : 'rgba(0, 0, 0, 0.05)',
+                barPresent: '#10b981',
+                barLate: '#f59e0b',
+                donutBorder: isDark ? '#1e293b' : '#ffffff',
+                donutColors: ['#10b981', '#f59e0b', '#ef4444', '#6366f1'] // On-time, Late, Absent, On Leave
+            };
+        }
 
-    // ── 1. Attendance Bar Chart (7 Days) ──
-    const ctxAtt = document.getElementById('attendanceChart')?.getContext('2d');
-    let attendanceChart = null;
-    if (ctxAtt) {
-        attendanceChart = new Chart(ctxAtt, {
-            type: 'bar',
-            data: {
-                labels: <?php echo json_encode($chartDates); ?>,
-                datasets: [
-                    {
-                        label: 'Present (On-time)',
-                        data: <?php echo json_encode($chartPresent); ?>,
-                        backgroundColor: colors.barPresent,
-                        borderRadius: 6,
-                        barPercentage: 0.6,
-                        categoryPercentage: 0.7
-                    },
-                    {
-                        label: 'Late / Delayed',
-                        data: <?php echo json_encode($chartLate); ?>,
-                        backgroundColor: colors.barLate,
-                        borderRadius: 6,
-                        barPercentage: 0.6,
-                        categoryPercentage: 0.7
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                animation: {
-                    duration: 1000,
-                    easing: 'easeOutQuart'
+        let colors = getChartThemeColors();
+
+        // ── 1. Attendance Bar Chart (7 Days) ──
+        const canvasAtt = document.getElementById('attendanceChart');
+        let attendanceChart = null;
+        if (canvasAtt) {
+            const existingAtt = Chart.getChart(canvasAtt);
+            if (existingAtt) existingAtt.destroy();
+
+            const ctxAtt = canvasAtt.getContext('2d');
+            attendanceChart = new Chart(ctxAtt, {
+                type: 'bar',
+                data: {
+                    labels: <?php echo json_encode($chartDates ?: []); ?>,
+                    datasets: [
+                        {
+                            label: 'Present (On-time)',
+                            data: <?php echo json_encode($chartPresent ?: []); ?>,
+                            backgroundColor: colors.barPresent,
+                            borderRadius: 6,
+                            barPercentage: 0.6,
+                            categoryPercentage: 0.7
+                        },
+                        {
+                            label: 'Late / Delayed',
+                            data: <?php echo json_encode($chartLate ?: []); ?>,
+                            backgroundColor: colors.barLate,
+                            borderRadius: 6,
+                            barPercentage: 0.6,
+                            categoryPercentage: 0.7
+                        }
+                    ]
                 },
-                plugins: {
-                    legend: {
-                        position: 'top',
-                        labels: {
-                            color: colors.textColor,
-                            font: { family: "'Plus Jakarta Sans', sans-serif", weight: '600', size: 12 },
-                            usePointStyle: true,
-                            pointStyle: 'circle',
-                            padding: 18
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: {
+                        duration: 800,
+                        easing: 'easeOutQuart'
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                            labels: {
+                                color: colors.textColor,
+                                font: { family: "'Plus Jakarta Sans', sans-serif", weight: '600', size: 12 },
+                                usePointStyle: true,
+                                pointStyle: 'circle',
+                                padding: 18
+                            }
+                        },
+                        tooltip: {
+                            padding: 12,
+                            cornerRadius: 8,
+                            titleFont: { family: "'Plus Jakarta Sans', sans-serif", weight: '700' },
+                            bodyFont: { family: "'Plus Jakarta Sans', sans-serif" }
                         }
                     },
-                    tooltip: {
-                        padding: 12,
-                        cornerRadius: 8,
-                        titleFont: { family: "'Plus Jakarta Sans', sans-serif", weight: '700' },
-                        bodyFont: { family: "'Plus Jakarta Sans', sans-serif" }
-                    }
-                },
-                scales: {
-                    x: {
-                        grid: { display: false },
-                        ticks: { color: colors.textColor, font: { weight: '600', size: 11 } }
-                    },
-                    y: {
-                        beginAtZero: true,
-                        grid: { color: colors.gridColor },
-                        ticks: { 
-                            stepSize: 1, 
-                            color: colors.textColor,
-                            font: { size: 11 }
+                    scales: {
+                        x: {
+                            grid: { display: false },
+                            ticks: { color: colors.textColor, font: { weight: '600', size: 11 } }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            grid: { color: colors.gridColor },
+                            ticks: { 
+                                stepSize: 1, 
+                                precision: 0,
+                                color: colors.textColor,
+                                font: { size: 11 }
+                            }
                         }
                     }
                 }
-            }
-        });
-    }
+            });
+        }
 
-    // ── 2. Today's Doughnut Chart ──
-    const ctxToday = document.getElementById('todayChart')?.getContext('2d');
-    let todayChart = null;
-    if (ctxToday) {
-        todayChart = new Chart(ctxToday, {
-            type: 'doughnut',
-            data: {
-                labels: ['Present', 'Absent', 'Late', 'Early Exit'],
-                datasets: [{
-                    data: [
-                        <?php echo $presentToday; ?>, 
-                        <?php echo $absentToday; ?>, 
-                        <?php echo $lateToday; ?>, 
-                        <?php echo $earlyLeaveToday; ?>
-                    ],
-                    backgroundColor: colors.donutColors,
-                    borderWidth: 0,
-                    hoverOffset: 6
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                cutout: '72%',
-                animation: {
-                    animateScale: true,
-                    animateRotate: true,
-                    duration: 1200
+        // ── 2. Today's Doughnut Chart ──
+        const canvasToday = document.getElementById('todayChart');
+        let todayChart = null;
+        if (canvasToday) {
+            const existingToday = Chart.getChart(canvasToday);
+            if (existingToday) existingToday.destroy();
+
+            const ctxToday = canvasToday.getContext('2d');
+            const totalHeadcount = <?php echo (int)$effectiveHeadcount; ?>;
+            const rawTodayData = [
+                <?php echo (int)$onTimePresentToday; ?>, 
+                <?php echo (int)$lateToday; ?>, 
+                <?php echo (int)$absentToday; ?>, 
+                <?php echo (int)$onLeaveToday; ?>
+            ];
+            const sumToday = rawTodayData.reduce((a, b) => a + b, 0);
+            const hasData = sumToday > 0;
+
+            todayChart = new Chart(ctxToday, {
+                type: 'doughnut',
+                data: {
+                    labels: hasData ? ['On-time Present', 'Late / Delayed', 'Absent', 'On Leave'] : ['No Activity Recorded Yet'],
+                    datasets: [{
+                        data: hasData ? rawTodayData : [1],
+                        backgroundColor: hasData ? colors.donutColors : [colors.gridColor || 'rgba(148, 163, 184, 0.25)'],
+                        borderWidth: hasData ? 2 : 1,
+                        borderColor: colors.donutBorder,
+                        hoverOffset: hasData ? 6 : 0
+                    }]
                 },
-                plugins: {
-                    legend: {
-                        position: 'bottom',
-                        labels: {
-                            color: colors.textColor,
-                            font: { family: "'Plus Jakarta Sans', sans-serif", weight: '600', size: 11 },
-                            usePointStyle: true,
-                            pointStyle: 'circle',
-                            padding: 14
-                        }
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '68%',
+                    animation: {
+                        animateScale: true,
+                        animateRotate: true,
+                        duration: 800
                     },
-                    tooltip: {
-                        padding: 12,
-                        cornerRadius: 8,
-                        titleFont: { family: "'Plus Jakarta Sans', sans-serif", weight: '700' }
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                color: colors.textColor,
+                                font: { family: "'Plus Jakarta Sans', sans-serif", weight: '600', size: 11 },
+                                usePointStyle: true,
+                                pointStyle: 'circle',
+                                padding: 12,
+                                boxWidth: 8
+                            }
+                        },
+                        tooltip: {
+                            enabled: hasData,
+                            padding: 10,
+                            cornerRadius: 8,
+                            titleFont: { family: "'Plus Jakarta Sans', sans-serif", weight: '700' },
+                            callbacks: {
+                                label: function(context) {
+                                    if (!hasData) return 'No activity recorded today';
+                                    const val = context.raw || 0;
+                                    const pct = totalHeadcount > 0 ? Math.round((val / totalHeadcount) * 100) : (sumToday > 0 ? Math.round((val / sumToday) * 100) : 0);
+                                    return ' ' + context.label + ': ' + val + ' (' + pct + '%)';
+                                }
+                            }
+                        }
                     }
                 }
-            }
-        });
-    }
+            });
+        }
 
-    // ── Theme Switch Observer for Real-Time Chart Color Sync ──
-    const themeBtn = document.getElementById('adminThemeToggle');
-    themeBtn?.addEventListener('click', () => {
-        setTimeout(() => {
+        // ── Theme Switch Observer for Real-Time Chart Color Sync ──
+        function syncChartThemes() {
             const newColors = getChartThemeColors();
             if (attendanceChart) {
                 attendanceChart.options.scales.x.ticks.color = newColors.textColor;
@@ -1239,11 +1469,80 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             if (todayChart) {
                 todayChart.options.plugins.legend.labels.color = newColors.textColor;
+                todayChart.data.datasets[0].borderColor = newColors.donutBorder;
+                const curSum = [
+                    <?php echo (int)$onTimePresentToday; ?>, 
+                    <?php echo (int)$lateToday; ?>, 
+                    <?php echo (int)$absentToday; ?>, 
+                    <?php echo (int)$onLeaveToday; ?>
+                ].reduce((a, b) => a + b, 0);
+                if (curSum > 0) {
+                    todayChart.data.datasets[0].backgroundColor = newColors.donutColors;
+                } else {
+                    todayChart.data.datasets[0].backgroundColor = [newColors.gridColor || 'rgba(148, 163, 184, 0.25)'];
+                }
                 todayChart.update();
             }
-        }, 50);
-    });
-});
+        }
+
+        const themeBtn = document.getElementById('adminThemeToggle');
+        themeBtn?.addEventListener('click', () => setTimeout(syncChartThemes, 50));
+
+        try {
+            const themeObserver = new MutationObserver(syncChartThemes);
+            themeObserver.observe(htmlRoot, { attributes: true, attributeFilter: ['data-theme'] });
+        } catch (e) {}
+
+        // ── Real-Time Auto-Sync with Database via Telemetry API ──
+        async function syncChartsWithDatabase() {
+            try {
+                const response = await fetch('dashboard?action=chart_telemetry');
+                if (!response.ok) return;
+                const result = await response.json();
+                if (!result || !result.success) return;
+
+                // Sync 7-Day Bar Chart
+                if (attendanceChart && result.chartDates && result.chartPresent && result.chartLate) {
+                    attendanceChart.data.labels = result.chartDates;
+                    attendanceChart.data.datasets[0].data = result.chartPresent;
+                    attendanceChart.data.datasets[1].data = result.chartLate;
+                    attendanceChart.update();
+                }
+
+                // Sync Today's Doughnut Chart
+                if (todayChart && result.today) {
+                    const freshData = [
+                        result.today.onTime,
+                        result.today.late,
+                        result.today.absent,
+                        result.today.onLeave
+                    ];
+                    const freshSum = freshData.reduce((a, b) => a + b, 0);
+                    todayChart.data.datasets[0].data = freshSum > 0 ? freshData : [1];
+                    todayChart.update();
+
+                    // Update Center Headcount Text
+                    const centerEl = document.querySelector('#todayChartCenter div:first-child');
+                    if (centerEl) {
+                        centerEl.textContent = result.today.totalPresent + '/' + result.today.effectiveHeadcount;
+                    }
+                }
+            } catch (err) {
+                // Background telemetry polling fails gracefully on connectivity loss
+            }
+        }
+
+        // Poll telemetry every 30 seconds for live updates
+        setInterval(syncChartsWithDatabase, 30000);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initDashboardCharts);
+    } else {
+        initDashboardCharts();
+    }
+})();
 </script>
+
 
 <?php include 'footer.php'; ?>

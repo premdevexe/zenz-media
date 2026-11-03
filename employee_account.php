@@ -38,24 +38,46 @@ if (isset($_GET['action']) && $_GET['action'] === 'view_aadhar') {
             die("No Aadhaar document found for this account.");
         }
 
-        $baseDir = realpath(__DIR__ . '/assets/uploads/aadhar');
-        $filePath = realpath(__DIR__ . '/assets/uploads/aadhar/' . basename($aadharDoc));
+        $uploadDir = __DIR__ . '/assets/uploads/aadhar';
+        if (!is_dir($uploadDir)) {
+            @mkdir($uploadDir, 0755, true);
+        }
 
-        // Path traversal defense
-        if (!$filePath || !$baseDir || !str_starts_with($filePath, $baseDir) || !file_exists($filePath)) {
+        $baseDir = realpath($uploadDir);
+        $cleanDoc = basename($aadharDoc);
+        $rawFilePath = $uploadDir . '/' . $cleanDoc;
+        $filePath = realpath($rawFilePath);
+
+        // Path traversal defense & file existence verification
+        if (!$filePath || !$baseDir || !file_exists($filePath)) {
             http_response_code(404);
             die("Document not found on storage.");
         }
 
-        $mime = mime_content_type($filePath) ?: 'application/octet-stream';
+        $safeBase = rtrim($baseDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if (!str_starts_with($filePath, $safeBase)) {
+            http_response_code(403);
+            die("Access denied.");
+        }
+
+        // Clean any output buffers to ensure uncorrupted binary file streaming
+        while (ob_get_level()) {
+            ob_end_clean();
+        }
+
+        // Multi-tier MIME detection (finfo -> mime_content_type -> getimagesize -> exif -> extension)
+        $mime = Security::detectFileMimeType($filePath) ?: 'application/octet-stream';
+        $ext = pathinfo($filePath, PATHINFO_EXTENSION);
+
         header('Content-Type: ' . $mime);
-        header('Content-Disposition: inline; filename="aadhaar_document_' . $employee_id . '.' . pathinfo($filePath, PATHINFO_EXTENSION) . '"');
+        header('Content-Disposition: inline; filename="aadhaar_document_' . $employee_id . '.' . $ext . '"');
         header('Content-Length: ' . filesize($filePath));
         header('X-Content-Type-Options: nosniff');
         header('Cache-Control: private, no-cache, no-store, must-revalidate');
         readfile($filePath);
         exit();
-    } catch (PDOException $e) {
+    } catch (Throwable $e) {
+        error_log("Error loading Aadhaar document (Employee ID: {$employee_id}): " . $e->getMessage());
         http_response_code(500);
         die("Error loading document.");
     }
@@ -105,13 +127,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                         
                         // Handle Avatar Upload if provided
                         if (isset($_FILES['avatar']) && $_FILES['avatar']['error'] === UPLOAD_ERR_OK) {
-                            $maxSize = 2 * 1024 * 1024; // 2MB
+                            $maxSize = 5 * 1024 * 1024; // 5MB limit
                             if ($_FILES['avatar']['size'] > $maxSize) {
-                                $message .= " However, avatar exceeds 2MB limit and was not updated.";
+                                $message .= " However, avatar exceeds 5MB limit and was not updated.";
                                 $messageType = 'warning';
                             } else {
-                                $finfo = new finfo(FILEINFO_MIME_TYPE);
-                                $mimeType = $finfo->file($_FILES['avatar']['tmp_name']);
+                                $mimeType = Security::detectFileMimeType($_FILES['avatar']['tmp_name'], $_FILES['avatar']['name'] ?? '');
                                 $allowedMimeTypes = [
                                     'image/jpeg' => 'jpg',
                                     'image/png'  => 'png',
@@ -119,12 +140,13 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                                     'image/webp' => 'webp'
                                 ];
                                 
-                                if (array_key_exists($mimeType, $allowedMimeTypes)) {
+                                if ($mimeType && array_key_exists($mimeType, $allowedMimeTypes)) {
                                     $ext = $allowedMimeTypes[$mimeType];
-                                    $avatarDir = 'assets/uploads/avatars';
+                                    $avatarDir = __DIR__ . '/assets/uploads/avatars';
                                     if (!is_dir($avatarDir)) {
-                                        mkdir($avatarDir, 0755, true);
+                                        @mkdir($avatarDir, 0755, true);
                                     }
+                                    @chmod($avatarDir, 0755);
                                     
                                     // Fetch old avatar to remove it cleanly
                                     $curStmt = $pdo->prepare("SELECT avatar FROM employees WHERE id = ?");
@@ -135,6 +157,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                                     $uploadPath = $avatarDir . '/' . $fileName;
                                     
                                     if (move_uploaded_file($_FILES['avatar']['tmp_name'], $uploadPath)) {
+                                        @chmod($uploadPath, 0644);
                                         $stmt = $pdo->prepare("UPDATE employees SET avatar = ? WHERE id = ?");
                                         $stmt->execute([$fileName, $employee_id]);
                                         $_SESSION['employee_avatar'] = $fileName;
@@ -145,7 +168,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                                         }
                                         $message .= " Avatar updated successfully.";
                                     } else {
-                                        $message .= " Could not save avatar file. Please check folder permissions.";
+                                        $message .= " Could not save avatar file. Please verify directory write permissions on assets/uploads/avatars.";
                                         $messageType = 'warning';
                                     }
                                 } else {
@@ -155,9 +178,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                             }
                         }
                     }
-                } catch (PDOException $e) {
+                } catch (Throwable $e) {
                     error_log("Profile update error: " . $e->getMessage());
-                    $message = "An error occurred while updating your profile.";
+                    $message = "An error occurred while updating your profile. Details logged.";
                     $messageType = 'error';
                 }
             }
@@ -182,8 +205,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                         $message = "File exceeds the 5MB size limit. Please upload a smaller file.";
                         $messageType = 'error';
                     } else {
-                        $finfo = new finfo(FILEINFO_MIME_TYPE);
-                        $mimeType = $finfo->file($_FILES['aadhar_image']['tmp_name']);
+                        $mimeType = Security::detectFileMimeType($_FILES['aadhar_image']['tmp_name'], $_FILES['aadhar_image']['name'] ?? '');
                         $allowedMimeTypes = [
                             'image/jpeg'      => 'jpg',
                             'image/png'       => 'png',
@@ -191,24 +213,26 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                             'application/pdf' => 'pdf'
                         ];
                         
-                        if (array_key_exists($mimeType, $allowedMimeTypes)) {
+                        if ($mimeType && array_key_exists($mimeType, $allowedMimeTypes)) {
                             $ext = $allowedMimeTypes[$mimeType];
-                            $aadharDir = 'assets/uploads/aadhar';
+                            $aadharDir = __DIR__ . '/assets/uploads/aadhar';
                             if (!is_dir($aadharDir)) {
-                                mkdir($aadharDir, 0755, true);
+                                @mkdir($aadharDir, 0755, true);
                             }
+                            @chmod($aadharDir, 0755);
                             
                             $randomSuffix = bin2hex(random_bytes(16));
                             $fileName = 'aadhar_' . $employee_id . '_' . $randomSuffix . '.' . $ext;
                             $uploadPath = $aadharDir . '/' . $fileName;
                             
                             if (move_uploaded_file($_FILES['aadhar_image']['tmp_name'], $uploadPath)) {
+                                @chmod($uploadPath, 0644);
                                 $stmt = $pdo->prepare("UPDATE employees SET aadhar_image = ?, aadhar_verified = 1 WHERE id = ?");
                                 $stmt->execute([$fileName, $employee_id]);
                                 $message = "Aadhar card uploaded successfully! Your verification is now pending review by HR.";
                                 $messageType = 'success';
                             } else {
-                                $message = "Failed to upload file. Please try again.";
+                                $message = "Failed to upload file. Please check directory permissions on assets/uploads/aadhar.";
                                 $messageType = 'error';
                             }
                         } else {
@@ -1075,12 +1099,6 @@ $joinedDate = !empty($employee['created_at']) ? date('M d, Y', strtotime($employ
         }
 
         /* ── Info Cards & Guidelines ── */
-        .info-cards-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 18px;
-            margin-top: 24px;
-        }
         .info-card-item {
             background: var(--acc-surface-subtle);
             border: 1px solid var(--acc-border-subtle);
@@ -1792,7 +1810,7 @@ $joinedDate = !empty($employee['created_at']) ? date('M d, Y', strtotime($employ
                                     <i class="fa-solid fa-circle-check"></i> Verified &amp; Compliant
                                 </span>
                                 <?php if (!empty($employee['aadhar_image'])): ?>
-                                    <a href="employee_account?action=view_aadhar" 
+                                    <a href="/employee_account?action=view_aadhar" 
                                        target="_blank" 
                                        class="btn-secondary-clean" 
                                        style="padding: 6px 14px; font-size: 0.85rem;">
@@ -1813,7 +1831,7 @@ $joinedDate = !empty($employee['created_at']) ? date('M d, Y', strtotime($employ
                             You will receive confirmation once the document has been approved.
                         </div>
                         <?php if (!empty($employee['aadhar_image'])): ?>
-                            <a href="employee_account?action=view_aadhar" 
+                            <a href="/employee_account?action=view_aadhar" 
                                target="_blank" 
                                class="btn-secondary-clean" 
                                style="padding: 6px 12px; font-size: 0.82rem; white-space: nowrap;">
@@ -1869,31 +1887,6 @@ $joinedDate = !empty($employee['created_at']) ? date('M d, Y', strtotime($employ
                         </div>
                     </form>
                 <?php endif; ?>
-
-                <!-- Informational Compliance Guidelines -->
-                <div class="info-cards-grid">
-                    <div class="info-card-item">
-                        <i class="fa-solid fa-lock"></i>
-                        <div>
-                            <h5>Encrypted &amp; Secure</h5>
-                            <p>Your identity documents are stored in restricted directories with encrypted access controls.</p>
-                        </div>
-                    </div>
-                    <div class="info-card-item">
-                        <i class="fa-solid fa-user-shield"></i>
-                        <div>
-                            <h5>HR Compliance</h5>
-                            <p>Used strictly for employee payroll records, taxation compliance, and government identity regulations.</p>
-                        </div>
-                    </div>
-                    <div class="info-card-item">
-                        <i class="fa-solid fa-file-circle-check"></i>
-                        <div>
-                            <h5>Clear Legibility</h5>
-                            <p>Please ensure all 12 digits of your Aadhar number and your legal name are crisp and legible.</p>
-                        </div>
-                    </div>
-                </div>
             </div>
         </div>
 
@@ -1917,39 +1910,22 @@ $joinedDate = !empty($employee['created_at']) ? date('M d, Y', strtotime($employ
                         <i class="fa-solid fa-desktop"></i>
                         <div>
                             <h5>Active Session</h5>
-                            <p>Authenticated as <strong><?php echo $fullName; ?></strong> via Secure PHP Session.</p>
+                            <p>Authenticated as <strong><?php echo $fullName; ?></strong><?php if (!empty($employee['employee_code'])): ?> (<?php echo htmlspecialchars($employee['employee_code']); ?>)<?php endif; ?> via Secure PHP Session.</p>
                         </div>
                     </div>
                     <div class="info-card-item">
                         <i class="fa-solid fa-stopwatch"></i>
                         <div>
                             <h5>Inactivity Timeout</h5>
-                            <p>Automatic logout enabled after 30 minutes of idle inactivity.</p>
-                        </div>
-                    </div>
-                    <div class="info-card-item">
-                        <i class="fa-solid fa-shield-virus"></i>
-                        <div>
-                            <h5>CSRF Protection</h5>
-                            <p>Tokenized one-time challenge validation on all form submissions.</p>
-                        </div>
-                    </div>
-                    <div class="info-card-item">
-                        <i class="fa-solid fa-key"></i>
-                        <div>
-                            <h5>Password Encryption</h5>
-                            <p>One-way BCRYPT salted hashing algorithm protects your password.</p>
+                            <p>Automatic logout enabled after 30 minutes of idle inactivity to safeguard your portal access.</p>
                         </div>
                     </div>
                 </div>
 
-                <div style="margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--acc-border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: gap; gap: 16px;">
+                <div style="margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--acc-border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
                     <span style="font-size: 0.88rem; color: var(--acc-muted);">
                         Need assistance updating confidential information? Contact <a href="mailto:admin@cloudaspire.in" style="color: var(--acc-brand); text-decoration: none; font-weight: 600;">HR Administration</a>.
                     </span>
-                    <a href="employee_logout" class="btn-secondary-clean" style="color: var(--acc-danger); border-color: var(--acc-danger-border);">
-                        <i class="fa-solid fa-arrow-right-from-bracket"></i> Sign Out
-                    </a>
                 </div>
             </div>
         </div>
@@ -2236,12 +2212,9 @@ $joinedDate = !empty($employee['created_at']) ? date('M d, Y', strtotime($employ
                         <div style="text-align: center; padding: 36px 20px; background: var(--acc-surface-subtle); border: 1.5px dashed var(--acc-border); border-radius: 16px;">
                             <i class="fa-solid fa-fingerprint" style="font-size: 2.2rem; color: var(--acc-faint); margin-bottom: 12px; display: block;"></i>
                             <h3 style="font-size: 1rem; font-weight: 700; color: var(--acc-text-main); margin-bottom: 6px;">No Passkeys Registered Yet</h3>
-                            <p style="font-size: 0.86rem; color: var(--acc-muted); max-width: 420px; margin: 0 auto 16px;">
-                                Add your fingerprint, Face ID, Windows Hello, or hardware key to log into your account instantly with 1-touch verification.
+                            <p style="font-size: 0.86rem; color: var(--acc-muted); max-width: 440px; margin: 0 auto;">
+                                Use the <strong>Add Passkey</strong> button above to register fingerprint, Face ID, Windows Hello, or a security key.
                             </p>
-                            <button type="button" class="btn-brand" onclick="document.getElementById('openAddPasskeyBtn').click();" style="padding: 9px 20px; font-size: 0.88rem;">
-                                <i class="fa-solid fa-plus"></i> Add Your First Passkey
-                            </button>
                         </div>
                     `;
                     return;

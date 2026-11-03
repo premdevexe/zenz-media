@@ -481,78 +481,78 @@ function getTaskUrgencyBadge($dueDate, $status) {
     </div>
     <?php endif; ?>
 
-    <!-- Executive KPI Statistics Grid -->
+    <!-- Executive KPI Statistics Grid (Consistent with Employee Directory) -->
     <div class="stats-grid">
         <!-- Total Tasks -->
-        <a href="?tab=all" class="stat-card <?php echo $filterTab === 'all' ? 'active-stat' : ''; ?>">
+        <a href="?tab=all" class="stat-card stat-card--total <?php echo $filterTab === 'all' ? 'active-stat' : ''; ?>">
+            <div class="stat-details">
+                <span class="stat-label">Total Tasks</span>
+                <span class="stat-value"><?php echo $stats['total']; ?></span>
+                <span class="stat-sub"><i class="fa-solid fa-folder-tree"></i> Total pipeline</span>
+            </div>
             <div class="stat-icon-wrapper total">
                 <i class="fa-solid fa-folder-tree"></i>
             </div>
-            <div class="stat-details">
-                <div class="stat-value"><?php echo $stats['total']; ?></div>
-                <div class="stat-label">Total Tasks</div>
-            </div>
-            <div class="stat-trend"><i class="fa-solid fa-arrow-right"></i></div>
         </a>
 
         <!-- Sent / To Do -->
-        <a href="?tab=sent" class="stat-card <?php echo $filterTab === 'sent' ? 'active-stat' : ''; ?>">
+        <a href="?tab=sent" class="stat-card stat-card--sent <?php echo $filterTab === 'sent' ? 'active-stat' : ''; ?>">
+            <div class="stat-details">
+                <span class="stat-label">To Do / Sent</span>
+                <span class="stat-value"><?php echo $stats['sent']; ?></span>
+                <span class="stat-sub"><i class="fa-solid fa-inbox"></i> Pending start</span>
+            </div>
             <div class="stat-icon-wrapper sent">
                 <i class="fa-solid fa-inbox"></i>
             </div>
-            <div class="stat-details">
-                <div class="stat-value"><?php echo $stats['sent']; ?></div>
-                <div class="stat-label">To Do / Sent</div>
-            </div>
-            <div class="stat-trend"><i class="fa-solid fa-arrow-right"></i></div>
         </a>
 
-        <!-- In Progress (NEW ICON FIXED) -->
-        <a href="?tab=in_progress" class="stat-card <?php echo $filterTab === 'in_progress' ? 'active-stat' : ''; ?>">
+        <!-- In Progress -->
+        <a href="?tab=in_progress" class="stat-card stat-card--in-progress <?php echo $filterTab === 'in_progress' ? 'active-stat' : ''; ?>">
+            <div class="stat-details">
+                <span class="stat-label">In Progress</span>
+                <span class="stat-value"><?php echo $stats['in_progress']; ?></span>
+                <span class="stat-sub"><i class="fa-solid fa-arrows-rotate"></i> Active work</span>
+            </div>
             <div class="stat-icon-wrapper in-progress">
                 <i class="fa-solid fa-arrows-rotate"></i>
             </div>
-            <div class="stat-details">
-                <div class="stat-value"><?php echo $stats['in_progress']; ?></div>
-                <div class="stat-label">In Progress</div>
-            </div>
-            <div class="stat-trend"><i class="fa-solid fa-arrow-right"></i></div>
         </a>
 
         <!-- Under Verification -->
-        <a href="?tab=verify" class="stat-card <?php echo $filterTab === 'verify' ? 'active-stat' : ''; ?>">
+        <a href="?tab=verify" class="stat-card stat-card--verify <?php echo $filterTab === 'verify' ? 'active-stat' : ''; ?>">
+            <div class="stat-details">
+                <span class="stat-label">Under Verification</span>
+                <span class="stat-value"><?php echo $stats['verify']; ?></span>
+                <span class="stat-sub"><i class="fa-solid fa-magnifying-glass-chart"></i> Review needed</span>
+            </div>
             <div class="stat-icon-wrapper verify">
                 <i class="fa-solid fa-magnifying-glass-chart"></i>
             </div>
-            <div class="stat-details">
-                <div class="stat-value"><?php echo $stats['verify']; ?></div>
-                <div class="stat-label">Under Verification</div>
-            </div>
-            <div class="stat-trend"><i class="fa-solid fa-arrow-right"></i></div>
         </a>
 
         <!-- Completed -->
-        <a href="?tab=completed" class="stat-card <?php echo $filterTab === 'completed' ? 'active-stat' : ''; ?>">
+        <a href="?tab=completed" class="stat-card stat-card--completed <?php echo $filterTab === 'completed' ? 'active-stat' : ''; ?>">
+            <div class="stat-details">
+                <span class="stat-label">Completed</span>
+                <span class="stat-value"><?php echo $stats['completed']; ?></span>
+                <span class="stat-sub"><i class="fa-solid fa-circle-check"></i> Closed tasks</span>
+            </div>
             <div class="stat-icon-wrapper completed">
                 <i class="fa-solid fa-circle-check"></i>
             </div>
-            <div class="stat-details">
-                <div class="stat-value"><?php echo $stats['completed']; ?></div>
-                <div class="stat-label">Completed</div>
-            </div>
-            <div class="stat-trend"><i class="fa-solid fa-arrow-right"></i></div>
         </a>
 
         <!-- Overdue Tasks -->
-        <a href="?tab=overdue" class="stat-card <?php echo $filterTab === 'overdue' ? 'active-stat' : ''; ?>">
+        <a href="?tab=overdue" class="stat-card stat-card--overdue <?php echo $filterTab === 'overdue' ? 'active-stat' : ''; ?>">
+            <div class="stat-details">
+                <span class="stat-label">Overdue Tasks</span>
+                <span class="stat-value"><?php echo $stats['overdue']; ?></span>
+                <span class="stat-sub" style="color: var(--adm-danger);"><i class="fa-solid fa-triangle-exclamation"></i> Missed deadline</span>
+            </div>
             <div class="stat-icon-wrapper overdue">
                 <i class="fa-solid fa-triangle-exclamation"></i>
             </div>
-            <div class="stat-details">
-                <div class="stat-value"><?php echo $stats['overdue']; ?></div>
-                <div class="stat-label">Overdue Tasks</div>
-            </div>
-            <div class="stat-trend"><i class="fa-solid fa-arrow-right"></i></div>
         </a>
     </div>
 
@@ -603,11 +603,11 @@ function getTaskUrgencyBadge($dueDate, $status) {
             </div>
         </div>
 
-        <!-- Filter Inputs Row -->
+        <!-- Filter Inputs Row (Clean Task Search) -->
         <form method="GET" action="" class="filter-inputs-form" id="filterForm">
             <input type="hidden" name="tab" value="<?php echo htmlspecialchars($filterTab); ?>">
 
-            <div class="search-box-wrapper">
+            <div class="search-box-wrapper" style="flex: 1;">
                 <i class="fa-solid fa-magnifying-glass search-icon"></i>
                 <input type="text" id="taskSearchInput" name="search" class="task-input search-input" placeholder="Search tasks by title, description, assignee, department... (Press / to focus)" value="<?php echo htmlspecialchars($searchQuery); ?>">
                 <span class="kbd-hint">/</span>
@@ -616,51 +616,14 @@ function getTaskUrgencyBadge($dueDate, $status) {
                 <?php endif; ?>
             </div>
 
-            <div class="filter-select-group">
-                <!-- Assignee -->
-                <div class="select-wrapper">
-                    <i class="fa-solid fa-user select-icon"></i>
-                    <select name="filter_employee" class="task-select" onchange="this.form.submit()">
-                        <option value="">All Team Members</option>
-                        <?php foreach ($employeesList as $emp): ?>
-                            <option value="<?php echo $emp['id']; ?>" <?php echo $filterEmployee == $emp['id'] ? 'selected' : ''; ?>>
-                                <?php echo htmlspecialchars($emp['first_name'] . ' ' . $emp['last_name']); ?> (<?php echo htmlspecialchars($emp['department'] ?: 'General'); ?>)
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-
-                <!-- Priority -->
-                <div class="select-wrapper">
-                    <i class="fa-solid fa-flag select-icon"></i>
-                    <select name="filter_priority" class="task-select" onchange="this.form.submit()">
-                        <option value="">All Priorities</option>
-                        <option value="critical" <?php echo $filterPriority === 'critical' ? 'selected' : ''; ?>>🔥 Critical</option>
-                        <option value="high"     <?php echo $filterPriority === 'high' ? 'selected' : ''; ?>>⚡ High</option>
-                        <option value="medium"   <?php echo $filterPriority === 'medium' ? 'selected' : ''; ?>>🔷 Medium</option>
-                        <option value="low"      <?php echo $filterPriority === 'low' ? 'selected' : ''; ?>>🟢 Low</option>
-                    </select>
-                </div>
-
-                <!-- Status Filter (if not using quick tab) -->
-                <div class="select-wrapper">
-                    <i class="fa-solid fa-sliders select-icon"></i>
-                    <select name="filter_status" class="task-select" onchange="this.form.submit()">
-                        <option value="">All Workflow Statuses</option>
-                        <option value="sent"        <?php echo $filterStatus === 'sent' ? 'selected' : ''; ?>>📥 To Do / Sent</option>
-                        <option value="in_progress" <?php echo $filterStatus === 'in_progress' ? 'selected' : ''; ?>>🔄 In Progress</option>
-                        <option value="verify"      <?php echo $filterStatus === 'verify' ? 'selected' : ''; ?>>🔍 Under Verification</option>
-                        <option value="completed"   <?php echo $filterStatus === 'completed' ? 'selected' : ''; ?>>✅ Completed</option>
-                    </select>
-                </div>
-
-                <?php if (!empty($searchQuery) || !empty($filterEmployee) || !empty($filterPriority) || !empty($filterStatus) || $filterTab !== 'all'): ?>
-                    <a href="task" class="btn btn-outline-danger btn-reset-filters" title="Reset all filters">
+            <?php if (!empty($searchQuery) || $filterTab !== 'all'): ?>
+                <div class="filter-select-group">
+                    <a href="task" class="btn btn-outline-danger btn-reset-filters" title="Reset all search filters">
                         <i class="fa-solid fa-rotate-left"></i>
-                        <span>Reset</span>
+                        <span>Reset Search</span>
                     </a>
-                <?php endif; ?>
-            </div>
+                </div>
+            <?php endif; ?>
         </form>
     </div>
 
@@ -1539,34 +1502,87 @@ function getTaskUrgencyBadge($dueDate, $status) {
 }
 .alert-close:hover { opacity: 1; }
 
-/* KPI Statistics Grid */
+/* KPI Statistics Grid (Consistent with Employee Directory) */
 .stats-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
     gap: 16px;
+    margin-bottom: 24px;
 }
 
 .stat-card {
     background: var(--adm-surface, #ffffff);
     border: 1px solid var(--adm-border, #cbd5e1);
     border-radius: var(--adm-radius-lg, 16px);
-    padding: 18px 20px;
+    padding: 20px;
     display: flex;
-    align-items: center;
-    gap: 16px;
+    align-items: flex-start;
+    justify-content: space-between;
     text-decoration: none;
     position: relative;
-    transition: all var(--transition-fast, 0.15s ease);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+    overflow: hidden;
+    transition: all var(--adm-transition, 0.25s ease);
+    box-shadow: var(--adm-shadow-card, 0 1px 3px rgba(0, 0, 0, 0.04));
 }
 .stat-card:hover {
-    transform: translateY(-2px);
-    border-color: var(--adm-brand, #4f46e5);
-    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
+    transform: translateY(-3px);
+    border-color: var(--adm-brand-border, #cbd5e1);
+    box-shadow: var(--adm-shadow-hover, 0 10px 25px rgba(0, 0, 0, 0.08));
 }
 .stat-card.active-stat {
     border-color: var(--adm-brand, #4f46e5);
     background: var(--adm-brand-light, #eef2ff);
+}
+
+.stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 3px;
+    background: transparent;
+    transition: background var(--adm-transition, 0.25s ease);
+}
+.stat-card--total::before       { background: linear-gradient(90deg, #4f46e5, #7c3aed); }
+.stat-card--sent::before        { background: linear-gradient(90deg, #0284c7, #38bdf8); }
+.stat-card--in-progress::before { background: linear-gradient(90deg, #d97706, #f59e0b); }
+.stat-card--verify::before      { background: linear-gradient(90deg, #7c3aed, #a855f7); }
+.stat-card--completed::before   { background: linear-gradient(90deg, #059669, #10b981); }
+.stat-card--overdue::before     { background: linear-gradient(90deg, #e11d48, #f43f5e); }
+
+.stat-details {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.stat-label {
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--adm-muted, #475569);
+    margin: 0;
+}
+
+.stat-value {
+    font-family: 'Outfit', sans-serif;
+    font-size: 1.75rem;
+    font-weight: 800;
+    color: var(--adm-text-main, #09090b);
+    line-height: 1.1;
+    margin: 0;
+}
+
+.stat-sub {
+    font-size: 0.78rem;
+    color: var(--adm-faint, #64748b);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 2px;
 }
 
 .stat-icon-wrapper {
@@ -1576,51 +1592,16 @@ function getTaskUrgencyBadge($dueDate, $status) {
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 18px;
+    font-size: 1.25rem;
     flex-shrink: 0;
 }
 
-.stat-icon-wrapper.total       { background: rgba(79, 70, 229, 0.12); color: var(--adm-brand, #4f46e5); }
+.stat-icon-wrapper.total       { background: var(--adm-brand-light, rgba(79, 70, 229, 0.12)); color: var(--adm-brand, #4f46e5); }
 .stat-icon-wrapper.sent        { background: rgba(2, 132, 199, 0.12); color: #0284c7; }
-.stat-icon-wrapper.in-progress { background: rgba(217, 119, 6, 0.12);  color: #d97706; }
-.stat-icon-wrapper.verify      { background: rgba(124, 58, 237, 0.12);color: #7c3aed; }
-.stat-icon-wrapper.completed   { background: rgba(5, 150, 105, 0.12); color: #059669; }
-.stat-icon-wrapper.overdue     { background: rgba(225, 29, 72, 0.12);  color: #e11d48; }
-
-
-.stat-details {
-    flex: 1;
-    min-width: 0;
-}
-
-.stat-value {
-    font-size: 24px;
-    font-weight: 800;
-    color: var(--adm-text-main, #09090b);
-    line-height: 1.1;
-}
-
-.stat-label {
-    font-size: 12.5px;
-    font-weight: 600;
-    color: var(--adm-muted, #475569);
-    margin-top: 4px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.stat-trend {
-    font-size: 12px;
-    color: var(--adm-faint, #64748b);
-    opacity: 0.5;
-    transition: all 0.2s ease;
-}
-.stat-card:hover .stat-trend {
-    opacity: 1;
-    transform: translateX(2px);
-    color: var(--adm-brand, #4f46e5);
-}
+.stat-icon-wrapper.in-progress { background: var(--adm-warning-light, rgba(217, 119, 6, 0.12)); color: var(--adm-warning, #d97706); }
+.stat-icon-wrapper.verify      { background: rgba(124, 58, 237, 0.12); color: #7c3aed; }
+.stat-icon-wrapper.completed   { background: var(--adm-success-light, rgba(5, 150, 105, 0.12)); color: var(--adm-success, #059669); }
+.stat-icon-wrapper.overdue     { background: var(--adm-danger-light, rgba(225, 29, 72, 0.12)); color: var(--adm-danger, #e11d48); }
 
 /* Control Panel & Quick Filters */
 .task-control-panel {
@@ -2803,6 +2784,7 @@ function getTaskUrgencyBadge($dueDate, $status) {
 }
 
 @media (max-width: 480px) {
+    .stats-grid { grid-template-columns: 1fr; gap: 12px; margin-bottom: 20px; }
     .task-control-panel { padding: 12px; }
     .view-switcher-group { width: 100%; justify-content: space-between; }
     .view-btn-pill { flex: 1; }

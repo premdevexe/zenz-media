@@ -8,6 +8,7 @@
 require_once 'app/db.php';
 require_once 'app/security.php';
 require_once 'app/Mailer.php';
+require_once 'app/LeaveHelper.php';
 
 if (isset($pdo) && $pdo instanceof PDO) {
     Security::init($pdo);
@@ -22,11 +23,20 @@ if (!isset($_SESSION['employee_logged_in']) || $_SESSION['employee_logged_in'] !
 
 $employee_id   = (int)($_SESSION['employee_id'] ?? 0);
 $employee_name = $_SESSION['employee_name'] ?? 'Team Member';
+
+// Enforce role-based permission server-side (Member role does not have leaves.view)
+if (!Security::hasPermission('leaves.view', $employee_id)) {
+    $_SESSION['dash_notice'] = "Access Denied: Your assigned role does not possess permissions to access the Leave Management terminal.";
+    $_SESSION['dash_notice_type'] = "error";
+    header("Location: employee_dashboard");
+    exit();
+}
+
 $message       = '';
 $messageType   = '';
 
-// Supported Leave Types matching database enum('annual','sick','casual','early_departure')
-$leaveTypes = [
+// Supported Leave Types
+$allLeaveTypes = [
     'casual' => [
         'label' => 'Casual Leave',
         'desc'  => 'Short personal time off or family commitments',
@@ -51,6 +61,22 @@ $leaveTypes = [
         'bg'    => 'rgba(5, 150, 105, 0.1)',
         'border'=> 'rgba(5, 150, 105, 0.25)'
     ],
+    'maternity' => [
+        'label' => 'Maternity Leave',
+        'desc'  => 'Prenatal and postnatal leave for eligible female employees',
+        'icon'  => 'fa-person-breastfeeding',
+        'color' => '#db2777',
+        'bg'    => 'rgba(219, 39, 119, 0.1)',
+        'border'=> 'rgba(219, 39, 119, 0.25)'
+    ],
+    'paternity' => [
+        'label' => 'Paternity Leave',
+        'desc'  => 'Leave for eligible male employees upon childbirth or adoption',
+        'icon'  => 'fa-baby',
+        'color' => '#4f46e5',
+        'bg'    => 'rgba(79, 70, 229, 0.1)',
+        'border'=> 'rgba(79, 70, 229, 0.25)'
+    ],
     'early_departure' => [
         'label' => 'Early Departure / Half Day',
         'desc'  => 'Leaving shift early or arriving late for urgent appointments',
@@ -60,6 +86,23 @@ $leaveTypes = [
         'border'=> 'rgba(217, 119, 6, 0.25)'
     ]
 ];
+
+// Determine employee-eligible leave types dynamically
+$leaveTypes = [];
+foreach ($allLeaveTypes as $slug => $meta) {
+    $elig = LeaveHelper::checkEligibility($pdo, $employee_id, $slug);
+    if ($elig['eligible']) {
+        $leaveTypes[$slug] = $meta;
+    }
+}
+if (empty($leaveTypes)) {
+    $leaveTypes = [
+        'casual' => $allLeaveTypes['casual'],
+        'sick'   => $allLeaveTypes['sick'],
+        'annual' => $allLeaveTypes['annual'],
+        'early_departure' => $allLeaveTypes['early_departure'],
+    ];
+}
 
 // Status Lifecycle Configurations
 $statuses = [
@@ -102,8 +145,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $depTime   = trim($_POST['early_departure_time'] ?? '');
         $reason    = trim($_POST['reason'] ?? '');
 
-        if (!array_key_exists($leaveType, $leaveTypes)) {
-            $message     = 'Please select a valid leave classification.';
+        $elig = LeaveHelper::checkEligibility($pdo, $employee_id, $leaveType, $startDate);
+        if (!$elig['eligible']) {
+            $message     = $elig['message'];
             $messageType = 'error';
         } elseif (empty($startDate) || empty($endDate) || empty($reason)) {
             $message     = 'Please fill in all required date and reason fields.';
@@ -118,24 +162,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $messageType = 'error';
                 } else {
                     $days = (int)$end->diff($start)->days + 1;
-                    $departureVal = ($leaveType === 'early_departure' && !empty($depTime)) ? $depTime : null;
 
-                    $stmt = $pdo->prepare("INSERT INTO leave_requests 
-                        (employee_id, leave_type, start_date, end_date, days, reason, early_departure_time, status) 
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')");
-                    $stmt->execute([$employee_id, $leaveType, $startDate, $endDate, $days, $reason, $departureVal]);
+                    // 1. Check for overlapping requests
+                    $overlap = LeaveHelper::checkOverlap($pdo, $employee_id, $startDate, $endDate);
+                    if ($overlap) {
+                        $message     = "Date Conflict: You already have a " . ucfirst($overlap['status']) . " leave from {$overlap['start_date']} to {$overlap['end_date']}.";
+                        $messageType = 'error';
+                    } else {
+                        // 2. Check balance entitlement
+                        $leaveYear = (int)date('Y', strtotime($startDate));
+                        $balances = LeaveHelper::getEmployeeBalances($pdo, $employee_id, $leaveYear);
+                        $hasBalance = true;
 
-                    // Safe Email Alert (Non-blocking)
-                    try {
-                        $mailer = new Mailer($pdo);
-                        $typeLabel = $leaveTypes[$leaveType]['label'] ?? $leaveType;
-                        $mailer->sendLeaveRequestAlert($employee_name, $typeLabel, $startDate, $endDate, $reason);
-                    } catch (Throwable $mailEx) {
-                        error_log("Leave request mailer error: " . $mailEx->getMessage());
+                        if (isset($balances[$leaveType]) && $balances[$leaveType]['remaining_days'] < $days) {
+                            $hasBalance = false;
+                            $rem = $balances[$leaveType]['remaining_days'];
+                            $message = "Insufficient leave balance for {$leaveTypes[$leaveType]['label']}. You have {$rem} day(s) remaining, but requested {$days} day(s).";
+                            $messageType = 'error';
+                        }
+
+                        if ($hasBalance) {
+                            $departureVal = ($leaveType === 'early_departure' && !empty($depTime)) ? $depTime : null;
+
+                            $stmt = $pdo->prepare("INSERT INTO leave_requests 
+                                (employee_id, leave_type, start_date, end_date, days, reason, early_departure_time, status) 
+                                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')");
+                            $stmt->execute([$employee_id, $leaveType, $startDate, $endDate, $days, $reason, $departureVal]);
+
+                            // Safe Email Alert (Non-blocking)
+                            try {
+                                $mailer = new Mailer($pdo);
+                                $typeLabel = $leaveTypes[$leaveType]['label'] ?? $leaveType;
+                                $mailer->sendLeaveRequestAlert($employee_name, $typeLabel, $startDate, $endDate, $reason);
+                            } catch (Throwable $mailEx) {
+                                error_log("Leave request mailer error: " . $mailEx->getMessage());
+                            }
+
+                            $message     = 'Leave request for ' . $days . ' day' . ($days > 1 ? 's' : '') . ' submitted successfully. You will receive an approved LV Code upon review.';
+                            $messageType = 'success';
+                        }
                     }
-
-                    $message     = 'Leave request for ' . $days . ' day' . ($days > 1 ? 's' : '') . ' submitted successfully. You will receive an approved LV Code upon review.';
-                    $messageType = 'success';
                 }
             } catch (Exception $e) {
                 error_log("Leave submission error: " . $e->getMessage());
@@ -1003,23 +1069,6 @@ $csrfToken = Security::generateCSRFToken('employee_leave');
             </div>
         <?php endif; ?>
 
-        <!-- Hero Header -->
-        <section class="hero-banner">
-            <div>
-                <h1 class="hero-title">
-                    <i class="fas fa-calendar-xmark"></i>
-                    Leave Management
-                </h1>
-                <p class="hero-subtitle">
-                    Submit time-off requests, track supervisor approvals, and obtain official Leave Codes (LV Codes).
-                </p>
-            </div>
-            <button class="btn-submit-hero" onclick="openLeaveModal()">
-                <i class="fas fa-plus"></i>
-                Request Time Off
-            </button>
-        </section>
-
         <!-- KPI Metrics Grid -->
         <section class="kpi-grid">
             <div class="kpi-card kpi-indigo">
@@ -1116,7 +1165,7 @@ $csrfToken = Security::generateCSRFToken('employee_leave');
                 <?php foreach ($leaves as $leave): 
                     $lId      = (int)$leave['id'];
                     $typeKey  = $leave['leave_type'] ?? 'casual';
-                    $tCfg     = $leaveTypes[$typeKey] ?? $leaveTypes['casual'];
+                    $tCfg     = $allLeaveTypes[$typeKey] ?? $leaveTypes[$typeKey] ?? $allLeaveTypes['casual'];
                     $stKey    = $leave['status'] ?? 'pending';
                     $sCfg     = $statuses[$stKey] ?? $statuses['pending'];
 

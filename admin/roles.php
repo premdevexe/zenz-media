@@ -33,6 +33,8 @@ $messageType = '';
 
 // Check permission to view/manage roles
 $canManageRoles = Security::hasPermission('roles.manage', $adminId);
+$isSuperAdminUser = Security::isSuperAdmin($adminId);
+$currentUserPermSlugs = Security::getAdminPermissions($adminId);
 
 // ----------------------------------------------------------------------------
 // Process POST Actions: Edit Role and Permissions
@@ -77,14 +79,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 } else {
                     // Protection of critical system roles: Super Admin
                     if ($targetRole['slug'] === 'super_admin') {
-                        // Ensure roles.manage, settings.manage, and employees.view remain granted to Super Admin
-                        $permStmt = $pdo->query("SELECT id, slug FROM permissions WHERE slug IN ('roles.manage', 'settings.manage', 'employees.view')");
-                        $criticalPermIds = $permStmt->fetchAll(PDO::FETCH_KEY_PAIR);
-                        foreach ($criticalPermIds as $pId => $pSlug) {
-                            if (!in_array((int)$pId, $selectedPerms, true)) {
-                                $selectedPerms[] = (int)$pId;
+                        if (!$isSuperAdminUser) {
+                            $_SESSION['roles_flash'] = 'Access Denied: Only Super Admin can modify the Super Admin role.';
+                            $_SESSION['roles_flash_type'] = 'error';
+                            header('Location: roles');
+                            exit();
+                        }
+                        // Super Admin retains all system permissions
+                        $allPermIds = $pdo->query("SELECT id FROM permissions")->fetchAll(PDO::FETCH_COLUMN);
+                        $selectedPerms = array_map('intval', $allPermIds);
+                    } elseif (!$isSuperAdminUser) {
+                        // Non-Super Admins can only assign permissions they themselves possess
+                        $allPermRows = $pdo->query("SELECT id, slug FROM permissions")->fetchAll(PDO::FETCH_ASSOC);
+                        $actorAllowedIds = [];
+                        foreach ($allPermRows as $pRow) {
+                            if (in_array($pRow['slug'], $currentUserPermSlugs, true)) {
+                                $actorAllowedIds[] = (int)$pRow['id'];
                             }
                         }
+                        $actorAllowedSet = array_flip($actorAllowedIds);
+                        $filteredPerms = [];
+                        foreach ($selectedPerms as $pId) {
+                            if (isset($actorAllowedSet[$pId])) {
+                                $filteredPerms[] = $pId;
+                            }
+                        }
+                        $selectedPerms = $filteredPerms;
                     }
 
                     // Database Transaction
@@ -146,12 +166,14 @@ unset($_SESSION['roles_flash'], $_SESSION['roles_flash_type']);
 try {
     $rolesQuery = "SELECT r.*, 
         COUNT(DISTINCT rp.permission_id) AS permissions_count,
-        COUNT(DISTINCT ar.admin_id) AS admins_count
+        COUNT(DISTINCT ar.admin_id) AS admins_count,
+        COUNT(DISTINCT e.id) AS employees_count
         FROM roles r
         LEFT JOIN role_permissions rp ON r.id = rp.role_id
         LEFT JOIN admin_roles ar ON r.id = ar.role_id
+        LEFT JOIN employees e ON r.id = e.role_id
         GROUP BY r.id
-        ORDER BY r.is_system DESC, r.name ASC";
+        ORDER BY r.id ASC";
     $roles = $pdo->query($rolesQuery)->fetchAll(PDO::FETCH_ASSOC);
 
     // Fetch all available permissions grouped by module
@@ -288,6 +310,192 @@ include 'header.php';
         transform: translateY(-1px);
     }
 
+    /* Badges */
+    .badge-saas {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 4px 10px;
+        border-radius: var(--adm-radius-pill, 9999px);
+        font-size: 0.74rem;
+        font-weight: 700;
+        line-height: 1.4;
+        white-space: nowrap;
+    }
+    .badge-clean {
+        background: rgba(16, 185, 129, 0.12);
+        color: #059669;
+        border: 1px solid rgba(16, 185, 129, 0.25);
+    }
+    .badge-info {
+        background: rgba(59, 130, 246, 0.12);
+        color: #2563eb;
+        border: 1px solid rgba(59, 130, 246, 0.25);
+    }
+    .badge-purple {
+        background: rgba(139, 92, 246, 0.12);
+        color: #7c3aed;
+        border: 1px solid rgba(139, 92, 246, 0.25);
+    }
+    .badge-danger {
+        background: rgba(239, 68, 68, 0.12);
+        color: #dc2626;
+        border: 1px solid rgba(239, 68, 68, 0.25);
+    }
+
+    /* Alerts */
+    .alert-banner {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 18px;
+        border-radius: var(--adm-radius-md, 10px);
+        font-size: 0.88rem;
+        font-weight: 600;
+        margin-bottom: 16px;
+    }
+    .alert-success {
+        background: rgba(16, 185, 129, 0.12);
+        border: 1px solid rgba(16, 185, 129, 0.3);
+        color: #059669;
+    }
+    .alert-error {
+        background: rgba(239, 68, 68, 0.12);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        color: #dc2626;
+    }
+
+    /* Form and Panel Styles */
+    .panel-header-title {
+        font-family: 'Outfit', sans-serif;
+        font-size: 1.25rem;
+        font-weight: 800;
+        color: var(--adm-text-main);
+        margin: 0;
+    }
+    .panel-header-subtitle {
+        font-size: 0.82rem;
+        color: var(--adm-muted);
+        margin: 4px 0 0 0;
+    }
+    .form-group-item {
+        margin-bottom: 16px;
+    }
+    .form-group-item label {
+        display: block;
+        font-size: 0.82rem;
+        font-weight: 700;
+        color: var(--adm-text-main);
+        margin-bottom: 6px;
+    }
+    .input-with-icon-wrap {
+        position: relative;
+        display: flex;
+        align-items: center;
+    }
+    .input-prefix-icon {
+        position: absolute;
+        left: 14px;
+        color: var(--adm-muted);
+        font-size: 0.88rem;
+        pointer-events: none;
+        z-index: 2;
+    }
+    .form-control-saas {
+        width: 100%;
+        height: 42px;
+        box-sizing: border-box;
+        padding: 10px 14px 10px 38px;
+        font-size: 0.88rem;
+        border-radius: var(--adm-radius-md);
+        border: 1px solid var(--adm-border);
+        background: var(--adm-bg);
+        color: var(--adm-text-main);
+        font-family: inherit;
+        transition: all var(--adm-transition);
+    }
+    .form-control-saas:focus {
+        outline: none;
+        border-color: var(--adm-brand);
+        background: var(--adm-surface);
+        box-shadow: 0 0 0 3px var(--adm-brand-light);
+    }
+
+    /* Mini Buttons */
+    .mini-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        font-size: 0.76rem;
+        font-weight: 700;
+        border-radius: var(--adm-radius-sm);
+        border: 1px solid var(--adm-border);
+        background: var(--adm-surface);
+        color: var(--adm-text-main);
+        cursor: pointer;
+        text-decoration: none;
+        transition: all 0.2s;
+        font-family: inherit;
+        white-space: nowrap;
+    }
+    .mini-btn:hover {
+        border-color: var(--adm-brand);
+        color: var(--adm-brand);
+        background: var(--adm-brand-light);
+    }
+
+    /* Modal Buttons */
+    .modal-btn-row {
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 12px;
+    }
+    .modal-btn-cancel {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 9px 18px;
+        font-size: 0.88rem;
+        font-weight: 700;
+        border-radius: var(--adm-radius-md);
+        border: 1px solid var(--adm-border);
+        background: var(--adm-surface);
+        color: var(--adm-text-body);
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+    .modal-btn-cancel:hover {
+        background: var(--adm-surface-subtle);
+        color: var(--adm-text-main);
+    }
+    .modal-btn-confirm {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 9px 20px;
+        font-size: 0.88rem;
+        font-weight: 700;
+        border-radius: var(--adm-radius-md);
+        border: 1px solid transparent;
+        background: var(--adm-brand);
+        color: #ffffff;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+    }
+    .modal-btn-confirm:hover {
+        background: var(--adm-brand-hover, #4f46e5);
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgba(99, 102, 241, 0.35);
+    }
+    .modal-btn-confirm:disabled {
+        opacity: 0.7;
+        cursor: not-allowed;
+    }
+
     /* Modal Styling */
     .role-modal-overlay {
         display: none;
@@ -323,6 +531,10 @@ include 'header.php';
         border-radius: var(--adm-radius-md);
         padding: 14px 16px;
         margin-bottom: 14px;
+        transition: border-color 0.2s ease;
+    }
+    .perm-module-card:hover {
+        border-color: var(--adm-border);
     }
     .perm-module-title {
         font-size: 0.88rem;
@@ -345,21 +557,36 @@ include 'header.php';
         font-size: 0.82rem;
         color: var(--adm-text-body);
         cursor: pointer;
+        padding: 6px 8px;
+        border-radius: var(--adm-radius-sm);
+        transition: background-color 0.15s ease;
+    }
+    .perm-checkbox-item:hover {
+        background: rgba(99, 102, 241, 0.06);
     }
     .perm-checkbox-item input {
-        margin-top: 2px;
+        margin-top: 3px;
         accent-color: var(--adm-brand);
+        width: 15px;
+        height: 15px;
+        cursor: pointer;
+    }
+    @media (max-width: 768px) {
+        .perm-checkbox-grid { grid-template-columns: 1fr; }
+        .role-grid { grid-template-columns: 1fr; }
+        .role-meta-row { flex-wrap: wrap; }
     }
     @media (max-width: 480px) {
         .roles-page-wrapper { gap: 16px; }
         .role-card { padding: 16px; }
-        .role-modal-dialog { padding: 16px; }
+        .role-modal-dialog { padding: 16px; width: 100%; max-width: 100%; }
         .perm-module-card { padding: 12px; }
-        .perm-checkbox-grid { grid-template-columns: 1fr; }
+        .modal-btn-row { flex-direction: column-reverse; width: 100%; }
+        .modal-btn-cancel, .modal-btn-confirm { width: 100%; justify-content: center; }
     }
 </style>
 
-<div class="settings-page-wrapper">
+<div class="roles-page-wrapper">
 
     <!-- Top Ribbon -->
     <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
@@ -437,7 +664,7 @@ include 'header.php';
                     <div class="role-meta-row">
                         <div class="role-meta-item">
                             <i class="fa-solid fa-users" style="color: var(--adm-brand);"></i>
-                            <span><?php echo (int)$r['admins_count']; ?> Admin Assigned</span>
+                            <span><?php echo ((int)$r['admins_count'] + (int)($r['employees_count'] ?? 0)); ?> Assigned</span>
                         </div>
                         <div class="role-meta-item">
                             <i class="fa-solid fa-key" style="color: #059669;"></i>
@@ -447,16 +674,22 @@ include 'header.php';
 
                     <div class="role-action-row">
                         <?php if ($canManageRoles): ?>
-                            <button type="button" class="btn-edit-role" onclick='openEditRoleModal(<?php echo htmlspecialchars(json_encode([
-                                'id' => $r['id'],
-                                'name' => $r['name'],
-                                'slug' => $r['slug'],
-                                'description' => $r['description'] ?? '',
-                                'is_system' => $r['is_system'],
-                                'permissions' => $assignedPerms
-                            ]), ENT_QUOTES, 'UTF-8'); ?>)'>
-                                <i class="fa-solid fa-pen-to-square"></i> Edit Role &amp; Permissions
-                            </button>
+                            <?php if ($isSuperAdmin && !$isSuperAdminUser): ?>
+                                <span class="badge-saas" style="font-size: 0.8rem; color: #b45309; background: rgba(234, 179, 8, 0.12); border: 1px solid rgba(234, 179, 8, 0.3); padding: 6px 12px; border-radius: var(--adm-radius-pill);">
+                                    <i class="fa-solid fa-lock"></i> Protected Root Role
+                                </span>
+                            <?php else: ?>
+                                <button type="button" class="btn-edit-role" onclick='openEditRoleModal(<?php echo htmlspecialchars(json_encode([
+                                    'id' => $r['id'],
+                                    'name' => $r['name'],
+                                    'slug' => $r['slug'],
+                                    'description' => $r['description'] ?? '',
+                                    'is_system' => $r['is_system'],
+                                    'permissions' => $assignedPerms
+                                ]), ENT_QUOTES, 'UTF-8'); ?>)'>
+                                    <i class="fa-solid fa-pen-to-square"></i> Edit Role &amp; Permissions
+                                </button>
+                            <?php endif; ?>
                         <?php else: ?>
                             <span style="font-size: 0.8rem; color: var(--adm-muted);"><i class="fa-solid fa-lock"></i> Read-Only</span>
                         <?php endif; ?>
@@ -526,8 +759,11 @@ include 'header.php';
                         </div>
                         <div class="perm-checkbox-grid">
                             <?php foreach ($pList as $p): ?>
-                                <label class="perm-checkbox-item">
-                                    <input type="checkbox" name="permissions[]" value="<?php echo (int)$p['id']; ?>" class="role-perm-check" id="perm_<?php echo (int)$p['id']; ?>">
+                                <?php 
+                                    $canAssignThisPerm = $isSuperAdminUser || in_array($p['slug'], $currentUserPermSlugs, true);
+                                ?>
+                                <label class="perm-checkbox-item" <?php echo !$canAssignThisPerm ? 'style="opacity:0.55; cursor:not-allowed;" title="You do not possess this privilege and cannot grant it."' : ''; ?>>
+                                    <input type="checkbox" name="permissions[]" value="<?php echo (int)$p['id']; ?>" class="role-perm-check" id="perm_<?php echo (int)$p['id']; ?>" <?php echo !$canAssignThisPerm ? 'disabled' : ''; ?>>
                                     <span>
                                         <strong><?php echo htmlspecialchars($p['name']); ?></strong>
                                         <small style="display:block; color:var(--adm-muted); font-size:0.72rem;"><?php echo htmlspecialchars($p['description'] ?: $p['slug']); ?></small>
@@ -587,7 +823,7 @@ include 'header.php';
     }
 
     function toggleAllPerms(checked) {
-        document.querySelectorAll('.role-perm-check').forEach(cb => cb.checked = checked);
+        document.querySelectorAll('.role-perm-check:not([disabled])').forEach(cb => cb.checked = checked);
     }
 
     function validateRoleForm(e) {

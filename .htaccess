@@ -6,7 +6,7 @@ Options -Indexes
 # ----------------------------------------------------------------------
 # Security: Block sensitive files & hidden directories
 # ----------------------------------------------------------------------
-<FilesMatch "^(error_log|\.installed|\.env|composer\.(json|lock)|install\.php|.*\.sql|.*\.md)$">
+<FilesMatch "^(error_log|\.installed|\.env|composer\.(json|lock|phar|bat)|start-tunnel\.bat|install\.php|.*\.sql|.*\.md|.*\.bat|.*\.cmd|.*\.sh|.*\.phar)$">
     <IfModule mod_authz_core.c>
         Require all denied
     </IfModule>
@@ -25,10 +25,23 @@ Options -Indexes
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
     Header always set Permissions-Policy "geolocation=(self), camera=(), microphone=()"
     Header unset X-Powered-By
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" "expr=%{HTTPS} == 'on' || %{HTTP:X-Forwarded-Proto} == 'https'"
 </IfModule>
 
 # Block hidden files and folders (.git, etc.)
 RewriteEngine On
+
+# ----------------------------------------------------------------------
+# Canonical HTTPS Enforcement
+# Enforces HTTPS for staging and production domains while exempting
+# local development (localhost / 127.0.0.1). Supports reverse-proxy
+# headers (X-Forwarded-Proto, CF-Visitor) for Cloudflare/cPanel setups.
+# ----------------------------------------------------------------------
+RewriteCond %{HTTP_HOST} !^(localhost|127\.0\.0\.1)(:\d+)?$ [NC]
+RewriteCond %{HTTPS} off
+RewriteCond %{HTTP:X-Forwarded-Proto} !https
+RewriteCond %{HTTP:CF-Visitor} !{"scheme":"https"}
+RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
 
 RewriteRule "(^|/)\.(?!well-known)" - [F]
 
@@ -56,6 +69,8 @@ RewriteRule ^employee/projects/?$ employee_project.php [L]
 RewriteRule ^employee/leave/?$ employee_leave.php [L]
 RewriteRule ^employee/leaves/?$ employee_leave.php [L]
 RewriteRule ^employee/account/?$ employee_account.php [L]
+RewriteRule ^employee/account/view_aadhar/?$ employee_account.php?action=view_aadhar [L,QSA]
+RewriteRule ^employee/view_aadhar/?$ employee_account.php?action=view_aadhar [L,QSA]
 RewriteRule ^employee/logout/?$ employee_logout.php [L]
 
 # Redirect index.php to root

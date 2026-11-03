@@ -99,6 +99,7 @@ use lbuchs\WebAuthn\Binary\ByteBuffer;
 // Ensure secure session is initialized
 Security::init($pdo);
 Security::initSecureSession();
+Security::handleCORS();
 
 /**
  * Determine the Relying Party (RP) ID, Origin, and Name dynamically.

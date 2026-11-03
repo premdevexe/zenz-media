@@ -13,20 +13,29 @@ Security::initSecureSession();
 
 $isEmployeeLoggedIn = !empty($_SESSION['employee_logged_in']);
 $employeeName = $_SESSION['employee_name'] ?? 'Team Member';
+$isAdminLoggedIn = Security::isAuthenticated();
 
-// Fetch active site settings for branding
+// Fetch active site settings for branding & portal access
 $siteName = 'Cloud Aspire'; 
 $siteLogo = null;
 $siteFavicon = null;
+$employeeIndexEnabled = 1;
+$supportEmail = null;
+$supportPhone = null;
 
 if (isset($pdo) && $pdo instanceof PDO) {
     try {
-        $stmt = $pdo->query("SELECT site_name, logo, favicon FROM site_settings WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1");
+        $stmt = $pdo->query("SELECT site_name, logo, favicon, employee_index_enabled, support_email, support_phone FROM site_settings WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1");
         $settings = $stmt->fetch(PDO::FETCH_ASSOC);
         if ($settings) {
             $siteName = !empty($settings['site_name']) ? $settings['site_name'] : $siteName;
             $siteLogo = !empty($settings['logo']) ? 'assets/uploads/site/' . $settings['logo'] : null;
             $siteFavicon = !empty($settings['favicon']) ? 'assets/uploads/site/' . $settings['favicon'] : null;
+            $supportEmail = !empty($settings['support_email']) ? $settings['support_email'] : null;
+            $supportPhone = !empty($settings['support_phone']) ? $settings['support_phone'] : null;
+            if (isset($settings['employee_index_enabled'])) {
+                $employeeIndexEnabled = (int)$settings['employee_index_enabled'];
+            }
         }
     } catch (PDOException $e) {}
 }
@@ -37,6 +46,37 @@ if (!$siteLogo && file_exists(__DIR__ . '/assets/uploads/site/logo-96e285f855212
 }
 if (!$siteFavicon && file_exists(__DIR__ . '/assets/uploads/site/favicon-b9f474fa06bc608e0ac6586c.png')) {
     $siteFavicon = 'assets/uploads/site/favicon-b9f474fa06bc608e0ac6586c.png';
+}
+
+// Allow logged-in administrator to turn ON the index page directly from index.php
+if ($isAdminLoggedIn && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['turn_on_employee_index'])) {
+    if (isset($_POST['csrf_token']) && Security::validateCSRFToken($_POST['csrf_token'], 'turn_on_employee_index')) {
+        try {
+            $pdo->query("UPDATE site_settings SET employee_index_enabled = 1 WHERE is_active = 1");
+            Security::logAudit($_SESSION['admin_id'] ?? 1, 'toggle_employee_index', 'site_settings', 0, ['employee_index_enabled' => 1]);
+        } catch (PDOException $e) {}
+    }
+    header("Location: /");
+    exit();
+}
+
+// Allow logged-in administrator to toggle/turn OFF the employee panel index page directly from index.php
+if ($isAdminLoggedIn && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['turn_off_employee_index']) || isset($_POST['toggle_employee_index']))) {
+    if (isset($_POST['csrf_token']) && (Security::validateCSRFToken($_POST['csrf_token'], 'turn_off_employee_index') || Security::validateCSRFToken($_POST['csrf_token'], 'toggle_employee_index'))) {
+        try {
+            $pdo->query("UPDATE site_settings SET employee_index_enabled = 0 WHERE is_active = 1");
+            Security::logAudit($_SESSION['admin_id'] ?? 1, 'toggle_employee_index', 'site_settings', 0, ['employee_index_enabled' => 0]);
+        } catch (PDOException $e) {}
+    }
+    header("Location: login");
+    exit();
+}
+
+// Server-side enforcement: When Employee Panel Index Page is switched OFF, redirect directly to Login Page
+$isAdminPreview = ($isAdminLoggedIn && isset($_GET['preview']) && $_GET['preview'] === '1');
+if ($employeeIndexEnabled === 0 && !$isAdminPreview) {
+    header("Location: login");
+    exit();
 }
 
 // Fetch live database statistics to empower Cloud Aspire data display
@@ -1871,6 +1911,43 @@ if (isset($pdo) && $pdo instanceof PDO) {
 </head>
 <body>
 
+    <?php if (!empty($isAdminPreview)): ?>
+        <div style="background: linear-gradient(90deg, #be123c, #e11d48); color: #fff; text-align: center; padding: 10px 16px; font-weight: 600; font-size: 0.86rem; position: sticky; top: 0; z-index: 999999; box-shadow: 0 4px 12px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap;">
+            <span><i class="fa-solid fa-triangle-exclamation"></i> <strong>ADMIN PREVIEW:</strong> The Employee Panel index page is currently set to <strong>OFF</strong>. Employees and public visitors are blocked and redirected to Login.</span>
+            <div style="display: flex; gap: 8px;">
+                <form method="POST" action="" style="display: inline; margin: 0;">
+                    <input type="hidden" name="csrf_token" value="<?php echo Security::generateCSRFToken('turn_on_employee_index'); ?>">
+                    <input type="hidden" name="turn_on_employee_index" value="1">
+                    <button type="submit" style="background: #fff; color: #be123c; border: none; padding: 4px 12px; border-radius: 6px; font-weight: 700; font-size: 0.8rem; cursor: pointer;">
+                        <i class="fa-solid fa-power-off"></i> Turn ON
+                    </button>
+                </form>
+                <a href="/admin/site_settings" style="background: rgba(255,255,255,0.2); color: #fff; text-decoration: none; padding: 4px 12px; border-radius: 6px; font-size: 0.8rem; font-weight: 600;">
+                    <i class="fa-solid fa-sliders"></i> Site Settings
+                </a>
+            </div>
+        </div>
+    <?php elseif ($isAdminLoggedIn): ?>
+        <div style="background: linear-gradient(90deg, #0f172a, #1e293b); color: #fff; text-align: center; padding: 10px 16px; font-weight: 600; font-size: 0.86rem; position: sticky; top: 0; z-index: 999999; box-shadow: 0 4px 12px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap;">
+            <span><i class="fa-solid fa-shield-halved"></i> <strong>ADMIN CONSOLE:</strong> Employee Panel is currently <strong>ON</strong>.</span>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <form method="POST" action="" style="display: inline; margin: 0;">
+                    <input type="hidden" name="csrf_token" value="<?php echo Security::generateCSRFToken('turn_off_employee_index'); ?>">
+                    <input type="hidden" name="turn_off_employee_index" value="1">
+                    <button type="submit" style="background: #e11d48; color: #fff; border: none; padding: 4px 12px; border-radius: 6px; font-weight: 700; font-size: 0.8rem; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;">
+                        <i class="fa-solid fa-power-off"></i> Switch OFF Employee Panel
+                    </button>
+                </form>
+                <a href="/admin/site_settings" style="background: rgba(255,255,255,0.18); color: #fff; text-decoration: none; padding: 4px 12px; border-radius: 6px; font-size: 0.8rem; font-weight: 600;">
+                    <i class="fa-solid fa-sliders"></i> Site Settings
+                </a>
+                <a href="/admin/dashboard" style="background: rgba(255,255,255,0.18); color: #fff; text-decoration: none; padding: 4px 12px; border-radius: 6px; font-size: 0.8rem; font-weight: 600;">
+                    <i class="fa-solid fa-gauge-high"></i> Dashboard
+                </a>
+            </div>
+        </div>
+    <?php endif; ?>
+
     <!-- Navigation Header (White-Label Frosted Glass) -->
     <header class="navbar" id="navbar">
         <div class="container">
@@ -1911,13 +1988,6 @@ if (isset($pdo) && $pdo instanceof PDO) {
                 <?php else: ?>
                     <a href="login.php" class="btn btn-saas-primary nav-desktop-login" style="padding: 9px 18px; font-size: 0.88rem;">
                         <i class="fas fa-arrow-right-to-bracket"></i> Login
-                    </a>
-                    <a href="https://wa.me/918098830937?text=Hello%20Cloud%20Aspire,%20I%20would%20like%20to%20consult%20for%20a%20project." 
-                       target="_blank" 
-                       rel="noopener" 
-                       class="btn btn-white-outline" 
-                       style="padding: 9px 18px; font-size: 0.88rem;">
-                        <i class="fab fa-whatsapp" style="color: var(--c-emerald);"></i> Consult
                     </a>
                 <?php endif; ?>
 
@@ -1970,12 +2040,6 @@ if (isset($pdo) && $pdo instanceof PDO) {
                 <?php else: ?>
                     <a href="login.php" class="btn btn-saas-primary w-100">
                         <i class="fas fa-arrow-right-to-bracket"></i> Employee Portal Login
-                    </a>
-                    <a href="https://wa.me/918098830937?text=Hello%20Cloud%20Aspire,%20I%20would%20like%20to%20consult%20for%20a%20project." 
-                       target="_blank" 
-                       rel="noopener" 
-                       class="btn btn-white-outline w-100">
-                        <i class="fab fa-whatsapp" style="color: var(--c-emerald);"></i> Consult via WhatsApp
                     </a>
                 <?php endif; ?>
             </div>

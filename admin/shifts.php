@@ -288,24 +288,83 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['action'])) {
                 $_SESSION['shift_flash'] = "Active shift cannot be deleted! Please set another shift as active first to prevent attendance calculation disruption.";
                 $_SESSION['shift_flash_type'] = 'error';
             } else {
-                // Safeguard: Check total shift count
-                $totalShifts = (int)$pdo->query("SELECT COUNT(*) FROM shift_settings")->fetchColumn();
-                if ($totalShifts <= 1) {
-                    $_SESSION['shift_flash'] = "Cannot delete the only configured shift in the system.";
+                // Safeguard 1: Check if employees are currently assigned to this shift
+                $stmtAssigned = $pdo->prepare("SELECT COUNT(*) FROM employees WHERE shift_id = ?");
+                $stmtAssigned->execute([$shiftId]);
+                $assignedCount = (int)$stmtAssigned->fetchColumn();
+
+                if ($assignedCount > 0) {
+                    $_SESSION['shift_flash'] = "Cannot delete '{$shift['shift_name']}' because {$assignedCount} employee(s) are currently assigned to it. Please reassign them to another shift first.";
                     $_SESSION['shift_flash_type'] = 'error';
                 } else {
-                    $delStmt = $pdo->prepare("DELETE FROM shift_settings WHERE id = ?");
-                    $delStmt->execute([$shiftId]);
+                    // Safeguard 2: Check total shift count
+                    $totalShifts = (int)$pdo->query("SELECT COUNT(*) FROM shift_settings")->fetchColumn();
+                    if ($totalShifts <= 1) {
+                        $_SESSION['shift_flash'] = "Cannot delete the only configured shift in the system.";
+                        $_SESSION['shift_flash_type'] = 'error';
+                    } else {
+                        $delStmt = $pdo->prepare("DELETE FROM shift_settings WHERE id = ?");
+                        $delStmt->execute([$shiftId]);
 
-                    Security::logAudit($adminId, 'delete_shift', 'shift_settings', $shiftId, ['shift_name' => $shift['shift_name']]);
+                        Security::logAudit($adminId, 'delete_shift', 'shift_settings', $shiftId, ['shift_name' => $shift['shift_name']]);
 
-                    $_SESSION['shift_flash'] = "Shift '{$shift['shift_name']}' deleted successfully.";
-                    $_SESSION['shift_flash_type'] = 'success';
+                        $_SESSION['shift_flash'] = "Shift '{$shift['shift_name']}' deleted successfully.";
+                        $_SESSION['shift_flash_type'] = 'success';
+                    }
                 }
             }
         } catch (PDOException $e) {
             error_log("Shift delete error: " . $e->getMessage());
             $_SESSION['shift_flash'] = 'Cannot delete shift because it is linked to historical employee attendance records.';
+            $_SESSION['shift_flash_type'] = 'error';
+        }
+        header("Location: shifts");
+        exit();
+    }
+
+    // 5. Assign Employees to Shift
+    elseif ($action === 'assign_employees' && isset($_POST['shift_id'])) {
+        $shiftId = (int)$_POST['shift_id'];
+        $empIds = $_POST['employee_ids'] ?? [];
+        if (!is_array($empIds)) $empIds = [];
+
+        try {
+            $stmt = $pdo->prepare("SELECT shift_name FROM shift_settings WHERE id = ?");
+            $stmt->execute([$shiftId]);
+            $shiftName = $stmt->fetchColumn();
+
+            if (!$shiftName) {
+                $_SESSION['shift_flash'] = "Target shift policy not found.";
+                $_SESSION['shift_flash_type'] = 'error';
+            } else {
+                $pdo->beginTransaction();
+
+                if (!empty($empIds)) {
+                    $inMarks = implode(',', array_fill(0, count($empIds), '?'));
+                    $params = array_merge([$shiftId], array_map('intval', $empIds));
+                    $stmtUp = $pdo->prepare("UPDATE employees SET shift_id = ? WHERE id IN ($inMarks)");
+                    $stmtUp->execute($params);
+
+                    // Reset employees who were on this shift but now unselected
+                    $resetParams = array_merge([$shiftId], array_map('intval', $empIds));
+                    $stmtReset = $pdo->prepare("UPDATE employees SET shift_id = NULL WHERE shift_id = ? AND id NOT IN ($inMarks)");
+                    $stmtReset->execute($resetParams);
+                } else {
+                    $stmtReset = $pdo->prepare("UPDATE employees SET shift_id = NULL WHERE shift_id = ?");
+                    $stmtReset->execute([$shiftId]);
+                }
+
+                $pdo->commit();
+                $assignedCount = count($empIds);
+                Security::logAudit($adminId, 'assign_shift_employees', 'shift_settings', $shiftId, ['assigned_count' => $assignedCount]);
+
+                $_SESSION['shift_flash'] = "Updated shift roster: {$assignedCount} employee(s) assigned to '{$shiftName}'.";
+                $_SESSION['shift_flash_type'] = 'success';
+            }
+        } catch (PDOException $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            error_log("Assign shift employees error: " . $e->getMessage());
+            $_SESSION['shift_flash'] = 'Error updating employee shift assignments.';
             $_SESSION['shift_flash_type'] = 'error';
         }
         header("Location: shifts");
@@ -329,6 +388,28 @@ try {
 } catch (PDOException $e) {
     $shifts = [];
 }
+
+// Load assigned employee counts per shift
+$assignedCounts = [];
+try {
+    $stCount = $pdo->query("SELECT shift_id, COUNT(*) as total FROM employees WHERE shift_id IS NOT NULL AND status = 'active' GROUP BY shift_id");
+    while ($r = $stCount->fetch(PDO::FETCH_ASSOC)) {
+        $assignedCounts[$r['shift_id']] = (int)$r['total'];
+    }
+} catch (PDOException $e) {}
+
+// Load all employees for assignment modal
+$allEmployeesList = [];
+try {
+    $stmtAllEmp = $pdo->query("
+        SELECT e.id, e.first_name, e.last_name, e.employee_id, e.department, e.shift_id, s.shift_name 
+        FROM employees e 
+        LEFT JOIN shift_settings s ON e.shift_id = s.id 
+        WHERE e.status = 'active' 
+        ORDER BY e.first_name ASC, e.last_name ASC
+    ");
+    $allEmployeesList = $stmtAllEmp->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {}
 
 // Calculate KPI Metrics
 $totalShiftsCount = count($shifts);
@@ -491,75 +572,91 @@ include 'header.php';
     transform: translateY(-1px);
 }
 
-/* KPI Stat Cards Grid */
+/* KPI Stat Cards Grid (Consistent with Employee Directory) */
 .shifts-kpi-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
     gap: 16px;
     margin-bottom: 24px;
 }
 .kpi-card {
-    background: var(--saas-card-bg);
-    border: 1px solid var(--saas-border);
-    border-radius: var(--adm-radius-xl);
+    background: var(--adm-surface, var(--saas-card-bg));
+    border: 1px solid var(--adm-border, var(--saas-border));
+    border-radius: var(--adm-radius-lg);
     padding: 20px;
     display: flex;
-    align-items: center;
-    gap: 16px;
-    box-shadow: var(--adm-shadow-card);
-    transition: transform var(--adm-transition), box-shadow var(--adm-transition);
+    align-items: flex-start;
+    justify-content: space-between;
     position: relative;
     overflow: hidden;
+    box-shadow: var(--adm-shadow-card);
+    transition: all var(--adm-transition);
 }
 .kpi-card:hover {
-    transform: translateY(-2px);
+    transform: translateY(-3px);
     box-shadow: var(--adm-shadow-hover);
+    border-color: var(--adm-brand-border);
 }
-.kpi-icon-wrap {
-    width: 48px;
-    height: 48px;
-    border-radius: var(--adm-radius-lg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.3rem;
-    flex-shrink: 0;
+.kpi-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 3px;
+    background: transparent;
+    transition: background var(--adm-transition);
 }
-.kpi-icon-indigo { background: rgba(79, 70, 229, 0.12); color: #4f46e5; }
-.kpi-icon-emerald { background: rgba(5, 150, 105, 0.12); color: #059669; }
-.kpi-icon-amber { background: rgba(217, 119, 6, 0.12); color: #d97706; }
-.kpi-icon-purple { background: rgba(147, 51, 234, 0.12); color: #9333ea; }
+.kpi-card--shifts::before   { background: linear-gradient(90deg, #4f46e5, #7c3aed); }
+.kpi-card--active::before   { background: linear-gradient(90deg, #059669, #10b981); }
+.kpi-card--duration::before { background: linear-gradient(90deg, #8b5cf6, #a855f7); }
+.kpi-card--grace::before    { background: linear-gradient(90deg, #d97706, #f59e0b); }
+
 .kpi-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
     min-width: 0;
-    flex: 1;
 }
 .kpi-label {
-    font-size: 0.78rem;
+    font-size: 0.8rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--saas-text-muted);
-    margin-bottom: 4px;
+    letter-spacing: 0.04em;
+    color: var(--adm-muted, var(--saas-text-muted));
 }
 .kpi-value {
     font-family: 'Outfit', sans-serif;
-    font-size: 1.45rem;
+    font-size: 1.75rem;
     font-weight: 800;
-    color: var(--saas-text-main);
-    line-height: 1.2;
+    color: var(--adm-text-main, var(--saas-text-main));
+    line-height: 1.1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 .kpi-sub {
     font-size: 0.78rem;
-    font-weight: 600;
-    color: var(--saas-text-muted);
-    margin-top: 4px;
+    color: var(--adm-faint, var(--saas-text-muted));
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
+    margin-top: 2px;
 }
+.kpi-icon-wrap {
+    width: 44px;
+    height: 44px;
+    border-radius: var(--adm-radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.25rem;
+    flex-shrink: 0;
+}
+.kpi-icon-indigo  { background: var(--adm-brand-light, rgba(79, 70, 229, 0.12)); color: var(--adm-brand, #4f46e5); }
+.kpi-icon-emerald { background: var(--adm-success-light, rgba(5, 150, 105, 0.12)); color: var(--adm-success, #059669); }
+.kpi-icon-purple  { background: rgba(139, 92, 246, 0.14); color: #8b5cf6; }
+.kpi-icon-amber   { background: var(--adm-warning-light, rgba(217, 119, 6, 0.12)); color: var(--adm-warning, #d97706); }
 
 /* Control Toolbar & View Switcher */
 .shifts-toolbar {
@@ -1170,70 +1267,70 @@ include 'header.php';
 <!-- ─── Enterprise KPI Stat Cards ────────────────────────────────────────────── -->
 <div class="shifts-kpi-grid">
     <!-- Card 1: Total Configured Shifts -->
-    <div class="kpi-card">
-        <div class="kpi-icon-wrap kpi-icon-indigo">
-            <i class="fa-solid fa-business-time"></i>
-        </div>
+    <div class="kpi-card kpi-card--shifts">
         <div class="kpi-info">
-            <div class="kpi-label">Configured Shifts</div>
-            <div class="kpi-value"><?php echo $totalShiftsCount; ?></div>
-            <div class="kpi-sub">
-                <span style="color: #059669;"><i class="fa-solid fa-circle-check"></i> 1 Active</span>
+            <span class="kpi-label">Configured Shifts</span>
+            <span class="kpi-value"><?php echo $totalShiftsCount; ?></span>
+            <span class="kpi-sub">
+                <span style="color: var(--adm-success);"><i class="fa-solid fa-circle-check"></i> 1 Active</span>
                 <span>&bull;</span>
                 <span><?php echo $standbyCount; ?> Standby</span>
-            </div>
+            </span>
+        </div>
+        <div class="kpi-icon-wrap kpi-icon-indigo">
+            <i class="fa-solid fa-business-time"></i>
         </div>
     </div>
 
     <!-- Card 2: Active Enterprise Shift -->
-    <div class="kpi-card">
-        <div class="kpi-icon-wrap kpi-icon-emerald">
-            <i class="fa-solid fa-clock"></i>
-        </div>
+    <div class="kpi-card kpi-card--active">
         <div class="kpi-info">
-            <div class="kpi-label">Active Shift Policy</div>
-            <div class="kpi-value" title="<?php echo htmlspecialchars($activeShift['shift_name'] ?? 'None'); ?>">
+            <span class="kpi-label">Active Shift Policy</span>
+            <span class="kpi-value" title="<?php echo htmlspecialchars($activeShift['shift_name'] ?? 'None'); ?>">
                 <?php echo htmlspecialchars($activeShift['shift_name'] ?? 'None'); ?>
-            </div>
-            <div class="kpi-sub">
+            </span>
+            <span class="kpi-sub">
                 <?php if ($activeShift): ?>
                     <span><?php echo date('h:i A', strtotime($activeShift['checkin_start'])); ?> &ndash; <?php echo date('h:i A', strtotime($activeShift['checkout_time'])); ?></span>
                 <?php else: ?>
                     <span style="color: var(--adm-danger);">No shift active</span>
                 <?php endif; ?>
-            </div>
+            </span>
+        </div>
+        <div class="kpi-icon-wrap kpi-icon-emerald">
+            <i class="fa-solid fa-clock"></i>
         </div>
     </div>
 
     <!-- Card 3: Standard Shift Duration -->
-    <div class="kpi-card">
-        <div class="kpi-icon-purple kpi-icon-wrap">
-            <i class="fa-solid fa-hourglass-half"></i>
-        </div>
+    <div class="kpi-card kpi-card--duration">
         <div class="kpi-info">
-            <div class="kpi-label">Shift Duration</div>
-            <div class="kpi-value"><?php echo $activeDurationText; ?></div>
-            <div class="kpi-sub">
+            <span class="kpi-label">Shift Duration</span>
+            <span class="kpi-value"><?php echo $activeDurationText; ?></span>
+            <span class="kpi-sub">
                 <?php if ($activeShift): ?>
                     <span>Check-in: <?php echo date('h:i A', strtotime($activeShift['checkin_start'])); ?> to <?php echo date('h:i A', strtotime($activeShift['checkin_end'])); ?></span>
                 <?php else: ?>
                     <span>Standard Workday</span>
                 <?php endif; ?>
-            </div>
+            </span>
+        </div>
+        <div class="kpi-icon-purple kpi-icon-wrap">
+            <i class="fa-solid fa-hourglass-half"></i>
         </div>
     </div>
 
     <!-- Card 4: Grace & Penalty Tolerance -->
-    <div class="kpi-card">
+    <div class="kpi-card kpi-card--grace">
+        <div class="kpi-info">
+            <span class="kpi-label">Grace &amp; Tolerances</span>
+            <span class="kpi-value"><?php echo ($activeShift['grace_minutes'] ?? $avgGrace); ?>m Grace</span>
+            <span class="kpi-sub">
+                <span>Late mark after <?php echo ($activeShift['late_threshold'] ?? 30); ?>m</span>
+            </span>
+        </div>
         <div class="kpi-icon-wrap kpi-icon-amber">
             <i class="fa-solid fa-shield-halved"></i>
-        </div>
-        <div class="kpi-info">
-            <div class="kpi-label">Grace &amp; Tolerances</div>
-            <div class="kpi-value"><?php echo ($activeShift['grace_minutes'] ?? $avgGrace); ?>m Grace</div>
-            <div class="kpi-sub">
-                <span>Late mark after <?php echo ($activeShift['late_threshold'] ?? 30); ?>m</span>
-            </div>
         </div>
     </div>
 </div>
@@ -1298,14 +1395,19 @@ include 'header.php';
                             <?php endif; ?>
                         </div>
 
-                        <?php if ($isAct): ?>
-                            <span class="status-pill status-pill-active" title="Currently enforcing this shift for workforce punches">
-                                <span class="pulse-dot"></span>
-                                <span>Active</span>
+                        <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+                            <span class="status-pill" style="background: rgba(99, 102, 241, 0.08); color: #4f46e5; border: 1px solid rgba(99, 102, 241, 0.2);" title="Total active staff assigned to this shift">
+                                <i class="fa-solid fa-users" style="font-size: 0.72rem;"></i> <?php echo $assignedCounts[$shift['id']] ?? 0; ?> Staff
                             </span>
-                        <?php else: ?>
-                            <span class="status-pill status-pill-standby">Standby</span>
-                        <?php endif; ?>
+                            <?php if ($isAct): ?>
+                                <span class="status-pill status-pill-active" title="Currently enforcing this shift for workforce punches">
+                                    <span class="pulse-dot"></span>
+                                    <span>Active</span>
+                                </span>
+                            <?php else: ?>
+                                <span class="status-pill status-pill-standby">Standby</span>
+                            <?php endif; ?>
+                        </div>
                     </div>
 
                     <!-- 24h Visual Timeline Preview -->
@@ -1362,6 +1464,11 @@ include 'header.php';
                     </div>
 
                     <div style="display: flex; gap: 6px; align-items: center;">
+                        <!-- Assign Staff Button -->
+                        <button type="button" class="card-action-btn" onclick="handleAssignStaff(<?php echo $shift['id']; ?>, '<?php echo htmlspecialchars(addslashes($shift['shift_name'])); ?>')" title="Assign staff members to this shift">
+                            <i class="fa-solid fa-user-plus"></i> Staff
+                        </button>
+
                         <!-- Edit Button (Safe JSON Data-Attribute) -->
                         <button type="button" class="card-action-btn" data-shift='<?php echo htmlspecialchars($shiftJson, ENT_QUOTES, 'UTF-8'); ?>' onclick="handleEditShift(this)" title="Edit this shift policy">
                             <i class="fa-solid fa-pen-to-square"></i> Edit
@@ -1407,6 +1514,7 @@ include 'header.php';
                 <th>Shift Details</th>
                 <th>Working Window</th>
                 <th>Shift Duration</th>
+                <th>Assigned Staff</th>
                 <th>Grace &amp; Tolerances</th>
                 <th>Status</th>
                 <th style="text-align: right;">Actions</th>
@@ -1415,7 +1523,7 @@ include 'header.php';
         <tbody>
             <?php if (empty($shifts)): ?>
                 <tr>
-                    <td colspan="6" style="text-align: center; padding: 40px; color: var(--saas-text-muted);">
+                    <td colspan="7" style="text-align: center; padding: 40px; color: var(--saas-text-muted);">
                         No shifts configured.
                     </td>
                 </tr>
@@ -1454,6 +1562,11 @@ include 'header.php';
                             </span>
                         </td>
                         <td>
+                            <span class="status-pill" style="background: rgba(99, 102, 241, 0.08); color: #4f46e5; border: 1px solid rgba(99, 102, 241, 0.2);">
+                                <i class="fa-solid fa-users"></i> <?php echo $assignedCounts[$shift['id']] ?? 0; ?>
+                            </span>
+                        </td>
+                        <td>
                             <div style="font-size: 0.82rem;">
                                 Grace: <strong><?php echo $shift['grace_minutes']; ?>m</strong> |
                                 Late: <strong><?php echo $shift['late_threshold']; ?>m</strong> |
@@ -1476,6 +1589,9 @@ include 'header.php';
                         </td>
                         <td style="text-align: right;">
                             <div style="display: inline-flex; gap: 6px; align-items: center;">
+                                <button type="button" class="card-action-btn" onclick="handleAssignStaff(<?php echo $shift['id']; ?>, '<?php echo htmlspecialchars(addslashes($shift['shift_name'])); ?>')" title="Assign Staff">
+                                    <i class="fa-solid fa-user-plus"></i>
+                                </button>
                                 <button type="button" class="card-action-btn" data-shift='<?php echo htmlspecialchars($shiftJson, ENT_QUOTES, 'UTF-8'); ?>' onclick="handleEditShift(this)">
                                     <i class="fa-solid fa-pen-to-square"></i>
                                 </button>
@@ -1713,6 +1829,56 @@ include 'header.php';
         <div class="saas-modal-footer">
             <button type="button" class="btn-saas btn-saas-secondary" onclick="closeModal('simulatorModal')">Close Simulator</button>
         </div>
+    </div>
+</div>
+
+<!-- ─── Assign Staff Modal ────────────────────────────────────────────────── -->
+<div class="saas-modal" id="assignStaffModal" role="dialog" aria-modal="true" aria-labelledby="assignModalTitle">
+    <div class="saas-modal-backdrop" onclick="closeModal('assignStaffModal')"></div>
+    <div class="saas-modal-dialog" style="max-width: 600px;">
+        <div class="saas-modal-header">
+            <h2 class="saas-modal-title" id="assignModalTitle">
+                <i class="fa-solid fa-users-gear" style="color: #4f46e5;"></i>
+                <span>Assign Staff &ndash; <span id="assignShiftNameLabel" style="color: #4f46e5;"></span></span>
+            </h2>
+            <button type="button" class="saas-modal-close" onclick="closeModal('assignStaffModal')" aria-label="Close dialog">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
+
+        <form method="POST" action="" id="assignStaffForm" style="margin: 0;">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+            <input type="hidden" name="action" value="assign_employees">
+            <input type="hidden" name="shift_id" id="assign_modal_shift_id" value="">
+
+            <div class="saas-modal-body" style="padding: 20px 24px;">
+                <p style="font-size: 0.86rem; color: var(--saas-text-muted); margin-bottom: 16px;">
+                    Select the employees assigned to this shift policy. Checked employees will have their attendance calculated according to this shift's check-in/out and grace rules.
+                </p>
+
+                <!-- Search Filter & Actions -->
+                <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 14px;">
+                    <div style="position: relative; flex: 1;">
+                        <i class="fa-solid fa-magnifying-glass" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--saas-text-muted); font-size: 0.85rem;"></i>
+                        <input type="text" id="assignEmployeeSearch" class="input-text" placeholder="Search employee name or ID..." onkeyup="filterAssignEmployees()" style="padding-left: 36px; height: 38px; font-size: 0.86rem;">
+                    </div>
+                    <button type="button" class="btn-saas btn-saas-secondary" onclick="toggleSelectAllStaff(true)" style="padding: 7px 12px; font-size: 0.8rem;">Select All</button>
+                    <button type="button" class="btn-saas btn-saas-secondary" onclick="toggleSelectAllStaff(false)" style="padding: 7px 12px; font-size: 0.8rem;">Clear</button>
+                </div>
+
+                <!-- Employees List Container -->
+                <div id="assignEmployeeListContainer" style="max-height: 340px; overflow-y: auto; border: 1px solid var(--saas-border); border-radius: var(--adm-radius-lg); padding: 8px; background: var(--adm-surface-subtle); display: flex; flex-direction: column; gap: 6px;">
+                    <!-- Populated dynamically via JS -->
+                </div>
+            </div>
+
+            <div class="saas-modal-footer">
+                <button type="button" class="btn-saas btn-saas-secondary" onclick="closeModal('assignStaffModal')">Cancel</button>
+                <button type="submit" class="btn-saas btn-saas-primary">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Assignments
+                </button>
+            </div>
+        </form>
     </div>
 </div>
 
@@ -1975,6 +2141,72 @@ function runSimulation() {
     statusBadge.style.color = badgeColor;
 
     document.getElementById('simExplanationText').innerText = explanation;
+}
+
+// ─── Staff Assignment Controller ───────────────────────────────────────────
+const allEmployeesData = <?php echo json_encode($allEmployeesList, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP); ?>;
+
+function handleAssignStaff(shiftId, shiftName) {
+    document.getElementById('assign_modal_shift_id').value = shiftId;
+    document.getElementById('assignShiftNameLabel').textContent = shiftName;
+    document.getElementById('assignEmployeeSearch').value = '';
+    renderAssignEmployees(shiftId);
+    openModal('assignStaffModal');
+}
+
+function renderAssignEmployees(targetShiftId) {
+    const container = document.getElementById('assignEmployeeListContainer');
+    container.innerHTML = '';
+
+    if (!allEmployeesData || allEmployeesData.length === 0) {
+        container.innerHTML = '<div style="padding: 20px; text-align: center; color: var(--saas-text-muted);">No active employees found in workforce directory.</div>';
+        return;
+    }
+
+    allEmployeesData.forEach(emp => {
+        const isAssigned = (parseInt(emp.shift_id) === parseInt(targetShiftId));
+        const currentShiftText = emp.shift_name ? emp.shift_name : 'No Policy (Default)';
+        const item = document.createElement('label');
+        item.className = 'assign-emp-row';
+        item.setAttribute('data-search', ((emp.first_name || '') + ' ' + (emp.last_name || '') + ' ' + (emp.employee_id || '') + ' ' + (emp.department || '')).toLowerCase());
+        item.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: var(--saas-card-bg); border: 1px solid var(--saas-border); border-radius: var(--adm-radius-md); cursor: pointer; transition: all 0.15s; margin-bottom: 2px;';
+        
+        item.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <input type="checkbox" name="employee_ids[]" value="${emp.id}" ${isAssigned ? 'checked' : ''} style="width: 17px; height: 17px; cursor: pointer; accent-color: #4f46e5;">
+                <div>
+                    <div style="font-weight: 700; font-size: 0.88rem; color: var(--saas-text-main);">${emp.first_name} ${emp.last_name}</div>
+                    <div style="font-size: 0.75rem; color: var(--saas-text-muted); display: flex; gap: 8px;">
+                        <span><i class="fa-solid fa-id-badge"></i> ${emp.employee_id}</span>
+                        ${emp.department ? `<span>&bull; ${emp.department}</span>` : ''}
+                    </div>
+                </div>
+            </div>
+            <div style="font-size: 0.76rem; font-weight: 600; text-align: right;">
+                ${isAssigned ? '<span style="color: #059669; background: #ecfdf5; padding: 2px 8px; border-radius: 999px;"><i class="fa-solid fa-check"></i> Assigned</span>' : `<span style="color: var(--saas-text-muted);">Current: ${currentShiftText}</span>`}
+            </div>
+        `;
+        container.appendChild(item);
+    });
+}
+
+function filterAssignEmployees() {
+    const term = document.getElementById('assignEmployeeSearch').value.toLowerCase().trim();
+    const rows = document.querySelectorAll('#assignEmployeeListContainer .assign-emp-row');
+    rows.forEach(r => {
+        const searchData = r.getAttribute('data-search') || '';
+        r.style.display = searchData.includes(term) ? 'flex' : 'none';
+    });
+}
+
+function toggleSelectAllStaff(select) {
+    const rows = document.querySelectorAll('#assignEmployeeListContainer .assign-emp-row');
+    rows.forEach(r => {
+        if (r.style.display !== 'none') {
+            const cb = r.querySelector('input[type="checkbox"]');
+            if (cb) cb.checked = select;
+        }
+    });
 }
 </script>
 

@@ -646,67 +646,88 @@ include 'header.php';
     color: var(--adm-brand);
 }
 
-/* 4 Enterprise KPI Cards */
+/* 4 Enterprise KPI Cards (Consistent with Employee Directory) */
 .reports-kpi-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
     gap: 16px;
+    margin-bottom: 24px;
 }
 .kpi-card {
     background: var(--adm-surface);
     border: 1px solid var(--adm-border);
-    border-radius: var(--adm-radius-xl);
+    border-radius: var(--adm-radius-lg);
     padding: 20px;
     display: flex;
-    align-items: center;
-    gap: 16px;
+    align-items: flex-start;
+    justify-content: space-between;
+    position: relative;
+    overflow: hidden;
     box-shadow: var(--adm-shadow-card);
-    transition: transform var(--adm-transition), box-shadow var(--adm-transition);
+    transition: all var(--adm-transition);
 }
 .kpi-card:hover {
-    transform: translateY(-2px);
+    transform: translateY(-3px);
     box-shadow: var(--adm-shadow-hover);
+    border-color: var(--adm-brand-border);
 }
-.kpi-icon-wrap {
-    width: 48px;
-    height: 48px;
-    border-radius: var(--adm-radius-lg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.3rem;
-    flex-shrink: 0;
+.kpi-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 3px;
+    background: transparent;
+    transition: background var(--adm-transition);
 }
-.kpi-icon-indigo { background: rgba(79, 70, 229, 0.12); color: #4f46e5; }
-.kpi-icon-emerald { background: rgba(5, 150, 105, 0.12); color: #059669; }
-.kpi-icon-amber { background: rgba(217, 119, 6, 0.12); color: #d97706; }
-.kpi-icon-rose { background: rgba(225, 29, 72, 0.12); color: #e11d48; }
+.kpi-card--hours::before      { background: linear-gradient(90deg, #4f46e5, #7c3aed); }
+.kpi-card--compliance::before { background: linear-gradient(90deg, #059669, #10b981); }
+.kpi-card--delays::before     { background: linear-gradient(90deg, #d97706, #f59e0b); }
+.kpi-card--anomalies::before  { background: linear-gradient(90deg, #e11d48, #f43f5e); }
 
-.kpi-info { min-width: 0; flex: 1; }
+.kpi-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
 .kpi-label {
-    font-size: 0.76rem;
+    font-size: 0.8rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.04em;
     color: var(--adm-muted);
-    margin-bottom: 4px;
 }
 .kpi-value {
     font-family: 'Outfit', sans-serif;
-    font-size: 1.45rem;
+    font-size: 1.75rem;
     font-weight: 800;
     color: var(--adm-text-main);
-    line-height: 1.2;
+    line-height: 1.1;
 }
 .kpi-sub {
     font-size: 0.78rem;
-    font-weight: 600;
-    color: var(--adm-muted);
-    margin-top: 4px;
+    color: var(--adm-faint);
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
+    margin-top: 2px;
 }
+.kpi-icon-wrap {
+    width: 44px;
+    height: 44px;
+    border-radius: var(--adm-radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.25rem;
+    flex-shrink: 0;
+}
+.kpi-icon-indigo  { background: var(--adm-brand-light); color: var(--adm-brand); }
+.kpi-icon-emerald { background: var(--adm-success-light); color: var(--adm-success); }
+.kpi-icon-amber   { background: var(--adm-warning-light); color: var(--adm-warning); }
+.kpi-icon-rose    { background: var(--adm-danger-light); color: var(--adm-danger); }
 
 /* Primary Report Segmented Navigation Bar */
 .reports-nav-toolbar {
@@ -785,15 +806,15 @@ include 'header.php';
 .reports-filter-panel {
     background: var(--adm-surface);
     border: 1px solid var(--adm-border);
-    border-radius: var(--adm-radius-xl);
-    padding: 18px 22px;
-    box-shadow: var(--adm-shadow-sm);
+    border-radius: var(--adm-radius-lg);
+    padding: 20px 22px;
+    box-shadow: var(--adm-shadow-card);
 }
 .filter-form-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 14px;
-    align-items: end;
+    align-items: flex-end;
 }
 .filter-field {
     display: flex;
@@ -806,9 +827,11 @@ include 'header.php';
     color: var(--adm-text-main);
     text-transform: uppercase;
     letter-spacing: 0.04em;
+    white-space: nowrap;
 }
 .filter-input, .filter-select {
     width: 100%;
+    height: 42px;
     padding: 9px 12px;
     font-size: 0.88rem;
     border-radius: var(--adm-radius-md);
@@ -816,6 +839,7 @@ include 'header.php';
     background: var(--adm-surface-subtle);
     color: var(--adm-text-main);
     font-family: inherit;
+    box-sizing: border-box;
     transition: all var(--adm-transition);
 }
 .filter-input:focus, .filter-select:focus {
@@ -825,13 +849,18 @@ include 'header.php';
     box-shadow: 0 0 0 3px var(--adm-brand-light);
 }
 
-/* Data Table Presentation */
+/* Data Table Presentation & Horizontal Responsiveness */
 .table-panel-card {
     background: var(--adm-surface);
     border: 1px solid var(--adm-border);
-    border-radius: var(--adm-radius-xl);
+    border-radius: var(--adm-radius-lg);
     overflow: hidden;
     box-shadow: var(--adm-shadow-card);
+}
+.table-responsive {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
 }
 .panel-header-toolbar {
     padding: 16px 22px;
@@ -860,6 +889,7 @@ include 'header.php';
 }
 .saas-table {
     width: 100%;
+    min-width: 860px;
     border-collapse: collapse;
     text-align: left;
 }
@@ -1068,73 +1098,73 @@ include 'header.php';
     <!-- ─── 4 Enterprise KPI Metric Cards ────────────────────────────────────── -->
     <div class="reports-kpi-grid">
         <!-- Card 1: Total Hours Logged -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-indigo">
-                <i class="fa-solid fa-business-time"></i>
-            </div>
+        <div class="kpi-card kpi-card--hours">
             <div class="kpi-info">
-                <div class="kpi-label"><?php echo ($reportType === 'monthly') ? 'Total Monthly Hours' : 'Hours in Period'; ?></div>
-                <div class="kpi-value">
+                <span class="kpi-label"><?php echo ($reportType === 'monthly') ? 'Total Monthly Hours' : 'Hours in Period'; ?></span>
+                <span class="kpi-value">
                     <?php 
                     $hoursCount = ($reportType === 'monthly') ? $monthlyTotals['total_work_hours'] : array_sum(array_column($detailedData, 'working_hours'));
                     echo number_format($hoursCount, 1) . ' hrs'; 
                     ?>
-                </div>
-                <div class="kpi-sub">
-                    <span style="color: #059669;"><i class="fa-solid fa-check"></i> <?php echo ($reportType === 'monthly') ? $monthlyTotals['total_present_days'] : count($detailedData); ?> punch days</span>
-                </div>
+                </span>
+                <span class="kpi-sub">
+                    <span style="color: var(--adm-success);"><i class="fa-solid fa-check"></i> <?php echo ($reportType === 'monthly') ? $monthlyTotals['total_present_days'] : count($detailedData); ?> punch days</span>
+                </span>
+            </div>
+            <div class="kpi-icon-wrap kpi-icon-indigo">
+                <i class="fa-solid fa-business-time"></i>
             </div>
         </div>
 
         <!-- Card 2: Punctuality Compliance Rate -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-emerald">
-                <i class="fa-solid fa-shield-halved"></i>
-            </div>
+        <div class="kpi-card kpi-card--compliance">
             <div class="kpi-info">
-                <div class="kpi-label">Punctuality Rate</div>
-                <div class="kpi-value">
+                <span class="kpi-label">Punctuality Rate</span>
+                <span class="kpi-value">
                     <?php 
                     echo ($reportType === 'monthly') ? $monthlyTotals['avg_compliance'] . '%' : '96.4%'; 
                     ?>
-                </div>
-                <div class="kpi-sub">
+                </span>
+                <span class="kpi-sub">
                     <span>On-time attendance standard</span>
-                </div>
+                </span>
+            </div>
+            <div class="kpi-icon-wrap kpi-icon-emerald">
+                <i class="fa-solid fa-shield-halved"></i>
             </div>
         </div>
 
         <!-- Card 3: Late Arrivals & Delays -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-amber">
-                <i class="fa-solid fa-clock-rotate-left"></i>
-            </div>
+        <div class="kpi-card kpi-card--delays">
             <div class="kpi-info">
-                <div class="kpi-label">Late Incidents</div>
-                <div class="kpi-value">
+                <span class="kpi-label">Late Incidents</span>
+                <span class="kpi-value">
                     <?php echo ($reportType === 'monthly') ? $monthlyTotals['total_delay_count'] : $auditMetrics['severe_delays']; ?>
-                </div>
-                <div class="kpi-sub">
-                    <span style="color: #d97706;">
+                </span>
+                <span class="kpi-sub">
+                    <span style="color: var(--adm-warning);">
                         <?php echo ($reportType === 'monthly') ? $monthlyTotals['total_delay_mins'] . ' total delay mins' : 'Needs review'; ?>
                     </span>
-                </div>
+                </span>
+            </div>
+            <div class="kpi-icon-wrap kpi-icon-amber">
+                <i class="fa-solid fa-clock-rotate-left"></i>
             </div>
         </div>
 
         <!-- Card 4: Audit Health / Flagged Anomalies -->
-        <div class="kpi-card">
-            <div class="kpi-icon-wrap kpi-icon-rose">
-                <i class="fa-solid fa-triangle-exclamation"></i>
-            </div>
+        <div class="kpi-card kpi-card--anomalies">
             <div class="kpi-info">
-                <div class="kpi-label">Audit Anomalies</div>
-                <div class="kpi-value"><?php echo $auditMetrics['total_flagged']; ?></div>
-                <div class="kpi-sub">
-                    <span style="color: #e11d48;">
+                <span class="kpi-label">Audit Anomalies</span>
+                <span class="kpi-value"><?php echo $auditMetrics['total_flagged']; ?></span>
+                <span class="kpi-sub">
+                    <span style="color: var(--adm-danger);">
                         <?php echo $auditMetrics['missed_checkouts']; ?> missing checkouts
                     </span>
-                </div>
+                </span>
+            </div>
+            <div class="kpi-icon-wrap kpi-icon-rose">
+                <i class="fa-solid fa-triangle-exclamation"></i>
             </div>
         </div>
     </div>
@@ -1248,13 +1278,16 @@ include 'header.php';
                 <input type="text" name="search" id="search_input" class="filter-input" placeholder="Name or Employee ID..." value="<?php echo htmlspecialchars($searchQuery); ?>">
             </div>
 
-            <div class="filter-field" style="display: flex; flex-direction: row; gap: 8px;">
-                <button type="submit" class="btn-saas btn-saas-primary" style="flex: 1; height: 42px;">
-                    <i class="fa-solid fa-filter"></i> Apply Filters
-                </button>
-                <a href="reports?report_type=<?php echo urlencode($reportType); ?>" class="btn-saas btn-saas-secondary" style="height: 42px;" title="Reset filters">
-                    <i class="fa-solid fa-arrows-rotate"></i>
-                </a>
+            <div class="filter-field filter-field--actions">
+                <label style="visibility: hidden;">Actions</label>
+                <div style="display: flex; gap: 8px;">
+                    <button type="submit" class="btn-saas btn-saas-primary" style="flex: 1; height: 42px;">
+                        <i class="fa-solid fa-filter"></i> Apply Filters
+                    </button>
+                    <a href="reports?report_type=<?php echo urlencode($reportType); ?>" class="btn-saas btn-saas-secondary" style="height: 42px; padding: 0 16px; display: inline-flex; align-items: center; justify-content: center;" title="Reset filters">
+                        <i class="fa-solid fa-arrows-rotate"></i>
+                    </a>
+                </div>
             </div>
         </form>
     </div>
@@ -1278,7 +1311,7 @@ include 'header.php';
                 </div>
             </div>
 
-            <div style="overflow-x: auto;">
+            <div class="table-responsive">
                 <table class="saas-table">
                     <thead>
                         <tr>
@@ -1398,7 +1431,7 @@ include 'header.php';
                 </div>
             </div>
 
-            <div style="overflow-x: auto;">
+            <div class="table-responsive">
                 <table class="saas-table">
                     <thead>
                         <tr>
@@ -1509,7 +1542,7 @@ include 'header.php';
                 </div>
             </div>
 
-            <div style="overflow-x: auto;">
+            <div class="table-responsive">
                 <table class="saas-table">
                     <thead>
                         <tr>
@@ -1590,7 +1623,7 @@ include 'header.php';
                 </div>
             </div>
 
-            <div style="overflow-x: auto;">
+            <div class="table-responsive">
                 <table class="saas-table">
                     <thead>
                         <tr>

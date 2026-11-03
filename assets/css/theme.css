@@ -1038,42 +1038,45 @@ body {
  ======================================== */
 .cards-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 24px;
-    margin-bottom: 32px;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
 }
 
 .dash-card {
     background: var(--surface);
-    border-radius: var(--radius-xl);
-    padding: 24px;
+    border-radius: var(--adm-radius-lg, var(--radius-xl));
+    padding: 20px;
     border: 1px solid var(--border);
     box-shadow: var(--shadow-sm);
     display: flex;
-    flex-direction: column;
-    align-items: center;
-    text-align: center;
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: space-between;
+    text-align: left;
     transition: transform var(--transition-smooth), box-shadow var(--transition-smooth);
 }
 
 .dash-card:hover {
-    transform: translateY(-4px);
+    transform: translateY(-3px);
     box-shadow: var(--shadow-md);
 }
 
 .dash-card-icon {
-    width: 56px;
-    height: 56px;
-    border-radius: var(--radius-lg);
+    width: 44px;
+    height: 44px;
+    border-radius: var(--adm-radius-md, var(--radius-lg));
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 16px;
+    margin-bottom: 0;
+    font-size: 1.25rem;
+    flex-shrink: 0;
 }
 
 .dash-card-icon svg {
-    width: 28px;
-    height: 28px;
+    width: 22px;
+    height: 22px;
 }
 
 .dash-card-icon--blue { background: var(--primary-50); color: var(--primary-500); }
@@ -1082,18 +1085,20 @@ body {
 .dash-card-icon--purple { background: var(--accent-50); color: var(--accent-500); }
 
 .dash-card-title {
-    font-size: 14px;
+    font-size: 0.8rem;
     color: var(--text-secondary);
-    margin: 0 0 8px 0;
-    font-weight: 500;
+    margin: 0 0 4px 0;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.04em;
 }
 
 .dash-card-value {
-    font-size: 32px;
-    font-weight: 700;
+    font-family: 'Outfit', sans-serif;
+    font-size: 1.75rem;
+    font-weight: 800;
     color: var(--text-primary);
+    line-height: 1.1;
     margin: 0;
 }
 
